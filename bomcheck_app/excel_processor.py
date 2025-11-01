@@ -11,6 +11,7 @@ from openpyxl.styles import PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .binding_library import BindingChoice, BindingGroup, BindingLibrary
+from .binding_library import BindingGroup, BindingLibrary
 from .models import (
     BindingProjectResult,
     ExecutionResult,
@@ -74,6 +75,23 @@ class ExcelProcessor:
             part_display,
             quantity_debug,
         ) = self._extract_part_quantities(data_sheets)
+        debug_logs: List[str] = []
+
+        replacement_summary, replacement_debug = self._apply_replacements(data_sheets)
+        debug_logs.extend(replacement_debug)
+
+        (
+            part_quantities,
+            part_desc,
+            part_display,
+            quantity_debug,
+        ) = self._extract_part_quantities(data_sheets)
+        debug_logs: List[str] = []
+
+        replacement_summary, replacement_debug = self._apply_replacements(wb)
+        debug_logs.extend(replacement_debug)
+
+        part_quantities, part_desc, part_display, quantity_debug = self._extract_part_quantities(wb)
         debug_logs.extend(quantity_debug)
 
         # Apply replacements to aggregated data
@@ -163,6 +181,9 @@ class ExcelProcessor:
                 )
 
         for ws in worksheets:  # 遍历目标工作表，高亮并记录命中的失效料号
+        for ws in worksheets:
+            # 遍历目标工作表，高亮并记录命中的失效料号
+        for ws in wb.worksheets:
             part_col_idx = self._identify_part_column(ws)
             debug_logs.append(f"[{ws.title}] 识别料号列: {self._format_column_debug(part_col_idx)}")
             if part_col_idx is None:
@@ -233,6 +254,12 @@ class ExcelProcessor:
             if ws.title in skip_titles:
                 debug_logs.append(f"[{ws.title}] 已跳过汇总工作表")
                 continue
+        for ws in worksheets:
+            # 逐行累计第一个工作表中的库存数量与描述信息
+            if ws.title in skip_titles:
+                debug_logs.append(f"[{ws.title}] 已跳过汇总工作表")
+                continue
+        for ws in wb.worksheets:
             qty_col_idx = self._identify_quantity_column(ws)
             part_col_idx = self._identify_part_column(ws)
             desc_col_idx = self._identify_description_column(ws, part_col_idx)
@@ -389,6 +416,18 @@ class ExcelProcessor:
                     if not item.desc and description:
                         item.desc = description
                     item.missing_qty += result.missing_qty
+                if result.missing_qty > 0:
+                    for part_no in result.missing_choices:
+                        part_key = normalize_part_no(part_no)
+                        description = part_desc.get(part_key) or self._lookup_choice_desc(group, part_no)
+                        display_no = part_display.get(part_key, part_no)
+                        item = missing_items.setdefault(
+                            part_key,
+                            MissingItem(part_no=display_no, desc=description, missing_qty=0.0),
+                        )
+                        if not item.desc and description:
+                            item.desc = description
+                        item.missing_qty += result.missing_qty
 
                 for matched_part_no in result.matched_details.keys():
                     used_parts.add(normalize_part_no(matched_part_no))
@@ -427,6 +466,16 @@ class ExcelProcessor:
         first_applicable_part: Optional[str] = None
 
         for idx, choice in enumerate(group.choices):
+        matched_details: Dict[str, float] = {}
+        applicable_choices: List[Tuple[int, BindingChoice, str, float]] = []
+        fallback_choices: List[str] = []
+        first_applicable_part: Optional[str] = None
+
+        for idx, choice in enumerate(group.choices):
+        missing_choices: List[str] = []
+        matched_details: Dict[str, float] = {}
+
+        for choice in group.choices:
             if not choice.part_no:
                 continue
             fallback_choices.append(choice.part_no)
@@ -445,6 +494,12 @@ class ExcelProcessor:
         applicable_choices.sort(key=lambda item: (-item[3], item[0]))
 
         for _idx, choice, choice_key, stock in applicable_choices:
+
+            remaining_need = max(required_qty - fulfilled_qty, 0.0)
+            if remaining_need <= 0:
+                continue
+
+            stock = available_inventory.get(choice_key, 0.0)
             if stock <= 0:
                 continue
 
@@ -468,6 +523,19 @@ class ExcelProcessor:
                 missing_choices = [first_applicable_part]
             elif fallback_choices:
                 missing_choices = [fallback_choices[0]]
+        missing_qty = max(required_qty - fulfilled_qty, 0.0)
+        missing_choices: List[str] = []
+        if missing_qty > 0:
+            if first_applicable_part:
+                missing_choices = [first_applicable_part]
+            elif fallback_choices:
+                missing_choices = [fallback_choices[0]]
+            if take_amount < remaining_need and choice.part_no not in missing_choices:
+                missing_choices.append(choice.part_no)
+
+        missing_qty = max(required_qty - fulfilled_qty, 0.0)
+        if missing_qty > 0 and not missing_choices:
+            missing_choices = [choice.part_no for choice in group.choices if choice.part_no]
 
         return RequirementGroupResult(
             group_name=group.group_name,
