@@ -390,6 +390,10 @@ class ExcelProcessor:
                 normalized_part, display_no, override_desc = resolved
                 part_display.setdefault(normalized_part, display_no)
 
+
+                normalized_part, display_no, override_desc = resolved
+                part_display.setdefault(normalized_part, display_no)
+
                 desc_value: Optional[str] = override_desc
                 if not desc_value:
                     desc_cell = (
@@ -421,10 +425,21 @@ class ExcelProcessor:
         return part_quantities, part_descriptions, part_display, debug_logs
 
     def _identify_quantity_column(self, ws: Worksheet) -> Optional[int]:
+        """Guess the quantity column by combining header keywords and numeric shape.
+
+        The previous implementation required every non-empty cell to be parsable as a
+        number, which fails when BOM sheets embed remarks such as "合计" or "-" inside
+        the quantity column.  The revised heuristic keeps track of both successful and
+        failed parses so that a mostly-numeric column is still selected.  The first two
+        columns are ignored (常见为序号/料号)，并根据可解析为整数的单元格数量作为首要排序规则。
+        """
+
         header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
         header_candidates: List[int] = []
         if header_row:
             for idx, value in enumerate(header_row):
+                if idx < 2:
+                    continue
                 if value in (None, ""):
                     continue
                 lowered = str(value).strip().lower()
@@ -433,6 +448,15 @@ class ExcelProcessor:
                 if any(keyword in lowered for keyword in ("数量", "數量", "qty", "quantity")):
                     header_candidates.append(idx)
 
+        # (col_idx, integer_count, numeric_count, failure_count, total_count)
+        numeric_scores: List[Tuple[int, int, int, int, int]] = []
+        for col_idx in range(ws.max_column):
+            if col_idx < 2:
+                continue
+            numeric_count = 0
+            integer_count = 0
+            failure_count = 0
+            total_count = 0
         numeric_scores: List[Tuple[int, int, int]] = []  # (col_idx, numeric_count, decimal_count)
         for col_idx in range(ws.max_column):
             numeric_count = 0
@@ -447,6 +471,26 @@ class ExcelProcessor:
                 value = cell[0]
                 if value in (None, ""):
                     continue
+                total_count += 1
+                parsed = self._parse_quantity_value(value)
+                if parsed is None:
+                    failure_count += 1
+                    continue
+                numeric_count += 1
+                if isclose(parsed, round(parsed), abs_tol=1e-6):
+                    integer_count += 1
+            if numeric_count:
+                numeric_scores.append(
+                    (col_idx, integer_count, numeric_count, failure_count, total_count)
+                )
+
+        def _select_best(
+            scores: List[Tuple[int, int, int, int, int]]
+        ) -> Optional[int]:
+            if not scores:
+                return None
+            # 优先选择转换后整数数量最多的列，再比较可解析数量、失败数量以及列索引确保稳定。
+            scores.sort(key=lambda item: (-item[1], -item[2], item[3], item[0]))
                 parsed = self._parse_quantity_value(value)
                 if parsed is None:
                     valid_column = False
@@ -468,6 +512,7 @@ class ExcelProcessor:
             selected = _select_best(header_scores)
             if selected is not None:
                 return selected
+            # 如果表头标记了数量列但无有效数值，直接返回首个表头候选项，保持旧行为。
             # 如果表头标记了数量列但数据为空，直接返回表头候选项中的首个
             return header_candidates[0]
 
