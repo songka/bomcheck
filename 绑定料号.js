@@ -40,8 +40,8 @@
 },
 {
   "projectDesc": "汇川400w无刹车电机",
-  "indexPartNo": "UC3010010033",
-  "indexPartDesc": "原材料;電控外購件;執行元件;伺服電機;型號:MS1H4-40B30CB-T334ZX6;功率:400W;是否带制动:是;品牌:匯川",
+  "indexPartNo": "UC3010010032",
+  "indexPartDesc": "原材料;電控外購件;執行元件;伺服電機;型號:MS1H4-40B30CB-T331ZX6;功率:400W;是否带制动:否;品牌:匯川",
   "requiredGroups": [
     {
       "groupName": "驱动器",
@@ -131,3 +131,4 @@
     }
   ]
 }
+
