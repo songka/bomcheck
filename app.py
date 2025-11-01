@@ -166,6 +166,13 @@ class BindingEditor:
         project_frame = Frame(main_frame)
         project_frame.pack(side=LEFT, fill=Y, padx=10, pady=10)
         Label(project_frame, text="项目列表").pack(anchor="w")
+        self.project_list = Listbox(
+            project_frame,
+            exportselection=False,
+            height=15,
+            activestyle="none",
+            selectmode="browse",
+        )
         self.project_list = Listbox(project_frame, exportselection=False, height=15)
         self.project_list.pack(fill=Y, expand=True)
         self.project_list.bind("<<ListboxSelect>>", lambda _event: self._on_project_select())
@@ -195,6 +202,13 @@ class BindingEditor:
         group_left = Frame(group_frame)
         group_left.pack(side=LEFT, fill=Y)
         Label(group_left, text="需求分组").pack(anchor="w")
+        self.group_list = Listbox(
+            group_left,
+            exportselection=False,
+            height=10,
+            activestyle="none",
+            selectmode="browse",
+        )
         self.group_list = Listbox(group_left, exportselection=False, height=10)
         self.group_list.pack(fill=Y, expand=True)
         self.group_list.bind("<<ListboxSelect>>", lambda _event: self._on_group_select())
@@ -300,6 +314,8 @@ class BindingEditor:
     def _on_project_select(self) -> None:
         selection = self.project_list.curselection()
         if self.selected_project_index is not None:
+            self._commit_choice_fields()
+            self._commit_group_fields()
             self._commit_project_fields()
         if not selection:
             self.selected_project_index = None
@@ -342,6 +358,7 @@ class BindingEditor:
 
     def _on_group_select(self) -> None:
         if self.selected_group_index is not None:
+            self._commit_choice_fields()
             self._commit_group_fields()
         selection = self.group_list.curselection()
         if not selection:
