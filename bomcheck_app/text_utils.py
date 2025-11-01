@@ -4,10 +4,10 @@ from functools import lru_cache
 
 MODES = ("t2s", "s2t")
 
-try:
+try:  # pragma: no cover - optional dependency
     from opencc import OpenCC
 except ImportError:  # pragma: no cover
-    OpenCC = None  # type: ignore
+    OpenCC = None  # type: ignore[misc, assignment]
 
 
 @lru_cache(maxsize=None)
@@ -16,12 +16,7 @@ def _get_converter(mode: str) -> OpenCC | None:
         return None
     try:
         return OpenCC(mode)
-def _get_converter() -> OpenCC | None:
-    if OpenCC is None:
-        return None
-    try:
-        return OpenCC("t2s")
-    except Exception:  # pragma: no cover
+    except Exception:  # pragma: no cover - opencc failure
         return None
 
 
@@ -39,7 +34,7 @@ def normalize_text(value: str) -> str:
             converted = converter.convert(base)
             if converted:
                 return converted.strip().lower()
-        except Exception:  # pragma: no cover
+        except Exception:  # pragma: no cover - opencc failure
             pass
     return base
 
@@ -55,18 +50,9 @@ def normalized_variants(value: str) -> set[str]:
             continue
         try:
             converted = converter.convert(base)
-        except Exception:  # pragma: no cover
+        except Exception:  # pragma: no cover - opencc failure
             continue
         normalized = _prepare_value(converted)
         if normalized:
             variants.add(normalized)
     return variants
-def normalize_text(value: str) -> str:
-    value = value.strip().lower()
-    converter = _get_converter()
-    if converter:
-        try:
-            value = converter.convert(value)
-        except Exception:  # pragma: no cover
-            pass
-    return value

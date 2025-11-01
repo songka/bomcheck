@@ -94,6 +94,7 @@ class Application:
         binding_group_count = sum(len(res.requirement_results) for res in result.binding_results)
         lines = [
             f"失效料号数量：{result.replacement_summary.total_invalid_found}",
+            f"已标记失效料号数量：{result.replacement_summary.total_invalid_previously_marked}",
             f"已替换数量：{result.replacement_summary.total_replaced}",
             "",
             f"绑定料号统计：找到 {len(result.binding_results)} 组项目，需求分组 {binding_group_count} 组",
@@ -389,6 +390,7 @@ class BindingEditor:
             self.group_list.selection_set(self.selected_group_index)
 
     def _refresh_choice_list(self, auto_select_first: bool = False) -> None:
+        self.choice_tree.selection_remove(self.choice_tree.selection())
         for item in self.choice_tree.get_children():
             self.choice_tree.delete(item)
         group = self.projects[self.selected_project_index].required_groups[self.selected_group_index]
@@ -407,10 +409,15 @@ class BindingEditor:
             )
         self._clear_choice_fields()
         if auto_select_first and group.choices:
-            self.choice_tree.selection_set("0")
+            first_id = "0"
+            self.choice_tree.focus(first_id)
+            self.choice_tree.selection_set(first_id)
             self._on_choice_select()
+        self.choice_tree.update_idletasks()
 
     def _clear_choice_fields(self) -> None:
+        self.choice_tree.selection_remove(self.choice_tree.selection())
+        self.choice_tree.focus("")
         self.choice_part_var.set("")
         self.choice_desc_var.set("")
         self.choice_mode_var.set("")

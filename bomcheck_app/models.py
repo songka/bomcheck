@@ -17,6 +17,7 @@ class ReplacementRecord:
 @dataclass
 class ReplacementSummary:
     total_invalid_found: int = 0
+    total_invalid_previously_marked: int = 0
     total_replaced: int = 0
     records: List[ReplacementRecord] = field(default_factory=list)
 
