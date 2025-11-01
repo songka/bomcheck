@@ -21,6 +21,7 @@ from .models import (
     RequirementGroupResult,
 )
 from .text_utils import normalize_text, normalized_variants
+from .text_utils import normalize_text
 
 
 def normalize_part_no(value: str) -> str:
@@ -70,6 +71,9 @@ class ExcelProcessor:
             part_display,
             part_desc,
         )
+        ) = self._evaluate_binding_requirements(part_quantities, part_desc, part_display, binding_library)
+        debug_logs.extend(binding_debug)
+        important_hits, important_part_numbers, important_debug = self._scan_important_materials(part_quantities, part_display)
         debug_logs.extend(important_debug)
         remainder_keys = (set(part_quantities.keys()) - used_part_numbers) | important_part_numbers
         self._write_result_sheets(
@@ -280,6 +284,7 @@ class ExcelProcessor:
             group_results: List[RequirementGroupResult] = []
             for group in project.required_groups:
                 result = self._evaluate_group(group, qty, part_quantities, part_display)
+                result = self._evaluate_group(group, part_quantities, part_display)
                 group_results.append(result)
                 if result.missing_qty > 0:
                     for part_no in result.missing_choices:
@@ -321,6 +326,10 @@ class ExcelProcessor:
         except (TypeError, ValueError):
             base_requirement = 1.0
         required_qty = project_qty * base_requirement
+        part_quantities: Dict[str, float],
+        part_display: Dict[str, str],
+    ) -> RequirementGroupResult:
+        required_qty = group.number or 1.0
         available_qty = 0.0
         missing_choices: List[str] = []
         matched_details: Dict[str, float] = {}
@@ -333,6 +342,7 @@ class ExcelProcessor:
             quantity = part_quantities.get(choice_key, 0.0)
             if quantity:
                 contributes = quantity
+                contributes = quantity if choice.number is None else min(quantity, choice.number)
                 available_qty += contributes
                 display_no = part_display.get(choice_key, choice.part_no)
                 matched_details[display_no] = matched_details.get(display_no, 0.0) + contributes
@@ -372,6 +382,7 @@ class ExcelProcessor:
         part_quantities: Dict[str, float],
         part_display: Dict[str, str],
         part_descriptions: Dict[str, str],
+        self, part_quantities: Dict[str, float], part_display: Dict[str, str]
     ) -> Tuple[List[ImportantMaterialHit], set[str], List[str]]:
         important_path = self.config.important_materials
         hits: List[ImportantMaterialHit] = []
@@ -384,6 +395,8 @@ class ExcelProcessor:
         for keyword in keywords:
             normalized_keyword = normalize_text(keyword)
             keyword_variants = normalized_variants(keyword)
+        for keyword in keywords:
+            normalized_keyword = normalize_text(keyword)
             total_qty = 0.0
             matched_detail: Dict[str, float] = {}
             for part_no, qty in part_quantities.items():
@@ -397,6 +410,7 @@ class ExcelProcessor:
                     )
                     part_variant_cache[part_no] = variants
                 if keyword_variants & variants or normalized_keyword in variants:
+                if normalized_keyword in normalize_text(display_no) or normalized_keyword in normalize_text(part_no):
                     total_qty += qty
                     matched_detail[display_no] = matched_detail.get(display_no, 0.0) + qty
                     matched_parts.add(part_no)

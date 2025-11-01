@@ -173,6 +173,7 @@ class BindingEditor:
             activestyle="none",
             selectmode="browse",
         )
+        self.project_list = Listbox(project_frame, exportselection=False, height=15)
         self.project_list.pack(fill=Y, expand=True)
         self.project_list.bind("<<ListboxSelect>>", lambda _event: self._on_project_select())
         Button(project_frame, text="新增项目", command=self._add_project).pack(fill=BOTH, pady=2)
@@ -208,6 +209,7 @@ class BindingEditor:
             activestyle="none",
             selectmode="browse",
         )
+        self.group_list = Listbox(group_left, exportselection=False, height=10)
         self.group_list.pack(fill=Y, expand=True)
         self.group_list.bind("<<ListboxSelect>>", lambda _event: self._on_group_select())
         Button(group_left, text="新增分组", command=self._add_group).pack(fill=BOTH, pady=2)
