@@ -94,11 +94,32 @@ class BindingLibrary:
         self.projects: List[BindingProject] = []
 
     def load(self) -> None:
-        if self.path.exists():
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            self.projects = [BindingProject.from_dict(item) for item in data]
-        else:
+        if not self.path.exists():
             self.projects = []
+            return
+
+        raw_text = self.path.read_text(encoding="utf-8").strip()
+        if not raw_text:
+            self.projects = []
+            return
+
+        data = self._load_payload(raw_text)
+        if isinstance(data, dict):
+            data = [data]
+
+        self.projects = [BindingProject.from_dict(item) for item in data]
+
+    def _load_payload(self, raw_text: str) -> Any:
+        try:
+            return json.loads(raw_text)
+        except json.JSONDecodeError:
+            trimmed = raw_text.strip()
+            if trimmed.startswith("{") and trimmed.endswith("}"):
+                try:
+                    return json.loads(f"[{trimmed}]")
+                except json.JSONDecodeError:
+                    pass
+            raise
 
     def save(self) -> None:
         payload = [project.to_dict() for project in self.projects]
