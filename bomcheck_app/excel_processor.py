@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from math import isclose
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -11,7 +12,6 @@ from openpyxl.styles import PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .binding_library import BindingChoice, BindingGroup, BindingLibrary
-from .binding_library import BindingGroup, BindingLibrary
 from .models import (
     BindingProjectResult,
     ExecutionResult,
@@ -50,6 +50,37 @@ def _row_has_non_black_value(row: Tuple[Cell, ...], ignore_idx: int) -> bool:
     return False
 
 
+def _format_quantity_cell(value):
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return value
+    if isclose(number, round(number), abs_tol=1e-6):
+        return int(round(number))
+    return round(number, 4)
+
+
+def _format_quantity_text(value) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+    if isclose(number, round(number), abs_tol=1e-6):
+        return str(int(round(number)))
+    text = f"{round(number, 4):g}"
+    return text
+
+
 class ExcelProcessor:
     def __init__(self, config) -> None:
         self.config = config
@@ -61,8 +92,10 @@ class ExcelProcessor:
             if sheet_name in wb.sheetnames:
                 del wb[sheet_name]
 
-        # 仅使用工作簿中的第一个工作表进行业务逻辑处理
-        data_sheets = wb.worksheets[:1]
+        # 使用除结果汇总外的所有工作表参与业务处理
+        data_sheets = [
+            ws for ws in wb.worksheets if ws.title not in {"执行统计", "剩余物料"}
+        ]
 
         debug_logs: List[str] = []
 
@@ -75,23 +108,6 @@ class ExcelProcessor:
             part_display,
             quantity_debug,
         ) = self._extract_part_quantities(data_sheets)
-        debug_logs: List[str] = []
-
-        replacement_summary, replacement_debug = self._apply_replacements(data_sheets)
-        debug_logs.extend(replacement_debug)
-
-        (
-            part_quantities,
-            part_desc,
-            part_display,
-            quantity_debug,
-        ) = self._extract_part_quantities(data_sheets)
-        debug_logs: List[str] = []
-
-        replacement_summary, replacement_debug = self._apply_replacements(wb)
-        debug_logs.extend(replacement_debug)
-
-        part_quantities, part_desc, part_display, quantity_debug = self._extract_part_quantities(wb)
         debug_logs.extend(quantity_debug)
 
         # Apply replacements to aggregated data
@@ -181,9 +197,6 @@ class ExcelProcessor:
                 )
 
         for ws in worksheets:  # 遍历目标工作表，高亮并记录命中的失效料号
-        for ws in worksheets:
-            # 遍历目标工作表，高亮并记录命中的失效料号
-        for ws in wb.worksheets:
             part_col_idx = self._identify_part_column(ws)
             debug_logs.append(f"[{ws.title}] 识别料号列: {self._format_column_debug(part_col_idx)}")
             if part_col_idx is None:
@@ -202,6 +215,7 @@ class ExcelProcessor:
                     continue
 
                 part_cell = row[part_col_idx]
+                summary.total_invalid_found += 1
                 # 如果该行已经被涂黑并且存在未涂黑的新料号，则视为已处理过，统计后跳过
                 if _is_black_fill(part_cell) and _row_has_non_black_value(row, part_col_idx):
                     summary.total_invalid_previously_marked += 1
@@ -210,7 +224,6 @@ class ExcelProcessor:
                     )
                     continue
 
-                summary.total_invalid_found += 1
                 invalid_no, invalid_desc, replacement_no, replacement_desc = match
 
                 for cell in row:
@@ -254,12 +267,6 @@ class ExcelProcessor:
             if ws.title in skip_titles:
                 debug_logs.append(f"[{ws.title}] 已跳过汇总工作表")
                 continue
-        for ws in worksheets:
-            # 逐行累计第一个工作表中的库存数量与描述信息
-            if ws.title in skip_titles:
-                debug_logs.append(f"[{ws.title}] 已跳过汇总工作表")
-                continue
-        for ws in wb.worksheets:
             qty_col_idx = self._identify_quantity_column(ws)
             part_col_idx = self._identify_part_column(ws)
             desc_col_idx = self._identify_description_column(ws, part_col_idx)
@@ -404,18 +411,6 @@ class ExcelProcessor:
                 )
                 group_results.append(result)
 
-                if result.missing_qty > 0 and result.missing_choices:
-                    part_no = result.missing_choices[0]
-                    part_key = normalize_part_no(part_no)
-                    description = part_desc.get(part_key) or self._lookup_choice_desc(group, part_no)
-                    display_no = part_display.get(part_key, part_no)
-                    item = missing_items.setdefault(
-                        part_key,
-                        MissingItem(part_no=display_no, desc=description, missing_qty=0.0),
-                    )
-                    if not item.desc and description:
-                        item.desc = description
-                    item.missing_qty += result.missing_qty
                 if result.missing_qty > 0:
                     for part_no in result.missing_choices:
                         part_key = normalize_part_no(part_no)
@@ -466,16 +461,6 @@ class ExcelProcessor:
         first_applicable_part: Optional[str] = None
 
         for idx, choice in enumerate(group.choices):
-        matched_details: Dict[str, float] = {}
-        applicable_choices: List[Tuple[int, BindingChoice, str, float]] = []
-        fallback_choices: List[str] = []
-        first_applicable_part: Optional[str] = None
-
-        for idx, choice in enumerate(group.choices):
-        missing_choices: List[str] = []
-        matched_details: Dict[str, float] = {}
-
-        for choice in group.choices:
             if not choice.part_no:
                 continue
             fallback_choices.append(choice.part_no)
@@ -494,27 +479,22 @@ class ExcelProcessor:
         applicable_choices.sort(key=lambda item: (-item[3], item[0]))
 
         for _idx, choice, choice_key, stock in applicable_choices:
-
-            remaining_need = max(required_qty - fulfilled_qty, 0.0)
-            if remaining_need <= 0:
-                continue
-
-            stock = available_inventory.get(choice_key, 0.0)
-            if stock <= 0:
-                continue
-
             remaining_need = max(required_qty - fulfilled_qty, 0.0)
             if remaining_need <= 0:
                 break
 
-            take_amount = min(stock, remaining_need)
+            current_stock = max(available_inventory.get(choice_key, 0.0), 0.0)
+            if current_stock <= 0:
+                continue
+
+            take_amount = min(current_stock, remaining_need)
             if take_amount <= 0:
                 continue
 
             display_no = part_display.get(choice_key, choice.part_no)
             matched_details[display_no] = matched_details.get(display_no, 0.0) + take_amount
             fulfilled_qty += take_amount
-            available_inventory[choice_key] = max(stock - take_amount, 0.0)
+            available_inventory[choice_key] = max(current_stock - take_amount, 0.0)
 
         missing_qty = max(required_qty - fulfilled_qty, 0.0)
         missing_choices: List[str] = []
@@ -523,19 +503,8 @@ class ExcelProcessor:
                 missing_choices = [first_applicable_part]
             elif fallback_choices:
                 missing_choices = [fallback_choices[0]]
-        missing_qty = max(required_qty - fulfilled_qty, 0.0)
-        missing_choices: List[str] = []
-        if missing_qty > 0:
-            if first_applicable_part:
-                missing_choices = [first_applicable_part]
-            elif fallback_choices:
-                missing_choices = [fallback_choices[0]]
-            if take_amount < remaining_need and choice.part_no not in missing_choices:
-                missing_choices.append(choice.part_no)
-
-        missing_qty = max(required_qty - fulfilled_qty, 0.0)
-        if missing_qty > 0 and not missing_choices:
-            missing_choices = [choice.part_no for choice in group.choices if choice.part_no]
+            if not missing_choices:
+                missing_choices = [choice.part_no for choice in group.choices if choice.part_no]
 
         return RequirementGroupResult(
             group_name=group.group_name,
@@ -688,17 +657,21 @@ class ExcelProcessor:
         ])
         for result in binding_results:
             for group_result in result.requirement_results:
+                matched_parts_text = ",".join(
+                    f"{part}:{_format_quantity_text(qty)}"
+                    for part, qty in group_result.matched_details.items()
+                )
                 summary_ws.append(
                     [
                         result.project_desc,
                         result.index_part_no,
-                        result.matched_quantity,
+                        _format_quantity_cell(result.matched_quantity),
                         group_result.group_name,
-                        group_result.required_qty,
-                        group_result.available_qty,
-                        group_result.missing_qty,
+                        _format_quantity_cell(group_result.required_qty),
+                        _format_quantity_cell(group_result.available_qty),
+                        _format_quantity_cell(group_result.missing_qty),
                         ",".join(group_result.missing_choices),
-                        ",".join(f"{part}:{qty}" for part, qty in group_result.matched_details.items()),
+                        matched_parts_text,
                     ]
                 )
 
@@ -706,18 +679,24 @@ class ExcelProcessor:
         summary_ws.append(["缺失物料"])
         summary_ws.append(["料号", "描述", "缺少数量"])
         for item in missing_items:
-            summary_ws.append([item.part_no, item.desc, item.missing_qty])
+            summary_ws.append(
+                [item.part_no, item.desc, _format_quantity_cell(item.missing_qty)]
+            )
 
         summary_ws.append([])
         summary_ws.append(["重要物料统计"])
         summary_ws.append(["关键字", "标准关键字", "数量", "命中料号"])
         for hit in important_hits:
+            matched_text = ",".join(
+                f"{part}:{_format_quantity_text(qty)}"
+                for part, qty in hit.matched_parts.items()
+            )
             summary_ws.append(
                 [
                     hit.keyword,
                     hit.converted_keyword,
-                    hit.total_quantity,
-                    ",".join(f"{part}:{qty}" for part, qty in hit.matched_parts.items()),
+                    _format_quantity_cell(hit.total_quantity),
+                    matched_text,
                 ]
             )
 
@@ -733,7 +712,7 @@ class ExcelProcessor:
                 [
                     part_display.get(key, key),
                     part_descriptions.get(key, ""),
-                    part_quantities.get(key, 0.0),
+                    _format_quantity_cell(part_quantities.get(key, 0.0)),
                 ]
             )
 
