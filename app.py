@@ -26,7 +26,7 @@ from tkinter import ttk
 
 from bomcheck_app.binding_library import BindingChoice, BindingGroup, BindingLibrary, BindingProject
 from bomcheck_app.config import load_config
-from bomcheck_app.excel_processor import ExcelProcessor
+from bomcheck_app.excel_processor import ExcelProcessor, format_quantity_text
 
 CONFIG_PATH = Path("config.json")
 
@@ -93,20 +93,27 @@ class Application:
 
         binding_group_count = sum(len(res.requirement_results) for res in result.binding_results)
         lines = [
-            f"失效料号数量：{result.replacement_summary.total_invalid_found}",
-            f"已标记失效料号数量：{result.replacement_summary.total_invalid_previously_marked}",
-            f"已替换数量：{result.replacement_summary.total_replaced}",
+            f"失效料号数量：{format_quantity_text(result.replacement_summary.total_invalid_found)}",
+            f"已标记失效料号数量：{format_quantity_text(result.replacement_summary.total_invalid_previously_marked)}",
+            f"已替换数量：{format_quantity_text(result.replacement_summary.total_replaced)}",
             "",
-            f"绑定料号统计：找到 {len(result.binding_results)} 组项目，需求分组 {binding_group_count} 组",
+            f"绑定料号统计：找到 {format_quantity_text(len(result.binding_results))} 组项目，需求分组 {format_quantity_text(binding_group_count)} 组",
         ]
         for binding_result in result.binding_results:
-            lines.append(f"- {binding_result.project_desc} ({binding_result.index_part_no})，主料数量：{binding_result.matched_quantity}")
+            lines.append(
+                f"- {binding_result.project_desc} ({binding_result.index_part_no})，主料数量：{format_quantity_text(binding_result.matched_quantity)}"
+            )
             for group_result in binding_result.requirement_results:
                 lines.append(
-                    f"  · {group_result.group_name}：需求 {group_result.required_qty}，可用 {group_result.available_qty}，缺少 {group_result.missing_qty}"
+                    "  · "
+                    + f"{group_result.group_name}：需求 {format_quantity_text(group_result.required_qty)}，"
+                    + f"可用 {format_quantity_text(group_result.available_qty)}，缺少 {format_quantity_text(group_result.missing_qty)}"
                 )
                 if group_result.matched_details:
-                    matched_text = ", ".join(f"{part}:{qty}" for part, qty in group_result.matched_details.items())
+                    matched_text = ", ".join(
+                        f"{part}:{format_quantity_text(qty)}"
+                        for part, qty in group_result.matched_details.items()
+                    )
                     lines.append(f"    满足料号：{matched_text}")
                 if group_result.missing_choices:
                     lines.append(f"    缺少料号：{', '.join(group_result.missing_choices)}")
@@ -116,14 +123,23 @@ class Application:
             lines.append("")
             lines.append("缺失物料：")
             for item in result.missing_items:
-                lines.append(f"- {item.part_no} {item.desc} 缺少 {item.missing_qty}")
+                lines.append(
+                    f"- {item.part_no} {item.desc} 缺少 {format_quantity_text(item.missing_qty)}"
+                )
         lines.append("")
-        lines.append(f"重要物料统计：找到 {len(result.important_hits)} 组")
+        lines.append(
+            f"重要物料统计：找到 {format_quantity_text(len(result.important_hits))} 组"
+        )
         if result.important_hits:
             for hit in result.important_hits:
-                lines.append(f"- {hit.keyword}（{hit.converted_keyword}）：{hit.total_quantity}")
+                lines.append(
+                    f"- {hit.keyword}（{hit.converted_keyword}）：{format_quantity_text(hit.total_quantity)}"
+                )
                 if hit.matched_parts:
-                    matched_text = ", ".join(f"{part}:{qty}" for part, qty in hit.matched_parts.items())
+                    matched_text = ", ".join(
+                        f"{part}:{format_quantity_text(qty)}"
+                        for part, qty in hit.matched_parts.items()
+                    )
                     lines.append(f"    命中料号：{matched_text}")
         else:
             lines.append("（无重要物料命中）")
