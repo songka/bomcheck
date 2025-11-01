@@ -246,6 +246,8 @@ class ExcelProcessor:
                 if not match:
                     continue
 
+                invalid_no, invalid_desc, replacement_no, replacement_desc = match
+
                 part_cell = row[part_col_idx]
                 summary.total_invalid_found += 1
                 if self._row_already_replaced(row, part_col_idx, part_cell, replacement_no):
@@ -254,8 +256,6 @@ class ExcelProcessor:
                         f"[{ws.title}] 行{row_idx} 失效料号 {part_no} 已标记替换，跳过"
                     )
                     continue
-
-                invalid_no, invalid_desc, replacement_no, replacement_desc = match
 
                 for cell in row:
                     cell.fill = BLACK_FILL
@@ -379,7 +379,7 @@ class ExcelProcessor:
             if part_col_idx is None:
                 continue
 
-            for row in ws.iter_rows(min_row=2):
+            for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
                 if part_col_idx >= len(row):
                     continue
 
@@ -407,39 +407,96 @@ class ExcelProcessor:
                 quantity = 1.0
                 if qty_col_idx is not None and qty_col_idx < len(row):
                     quantity_cell = row[qty_col_idx]
-                    try:
-                        quantity = float(quantity_cell.value)
-                    except (TypeError, ValueError):
-                        quantity = 1.0
+                    parsed_quantity = self._parse_quantity_value(quantity_cell.value)
+                    if parsed_quantity is not None:
+                        quantity = parsed_quantity
+                    else:
+                        quantity = 0.0
+                        debug_logs.append(
+                            f"[{ws.title}] 行{row_idx} 数量列值 {quantity_cell.value!r} 无法解析，按0处理"
+                        )
 
                 part_quantities[normalized_part] += quantity
 
         return part_quantities, part_descriptions, part_display, debug_logs
 
     def _identify_quantity_column(self, ws: Worksheet) -> Optional[int]:
+        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        header_candidates: List[int] = []
+        if header_row:
+            for idx, value in enumerate(header_row):
+                if value in (None, ""):
+                    continue
+                lowered = str(value).strip().lower()
+                if not lowered:
+                    continue
+                if any(keyword in lowered for keyword in ("数量", "數量", "qty", "quantity")):
+                    header_candidates.append(idx)
+
         numeric_scores: List[Tuple[int, int, int]] = []  # (col_idx, numeric_count, decimal_count)
-        for col_idx in range(3, ws.max_column):
+        for col_idx in range(ws.max_column):
             numeric_count = 0
             decimal_count = 0
             valid_column = True
-            for cell in ws.iter_rows(min_row=2, min_col=col_idx + 1, max_col=col_idx + 1, values_only=True):
+            for cell in ws.iter_rows(
+                min_row=2,
+                min_col=col_idx + 1,
+                max_col=col_idx + 1,
+                values_only=True,
+            ):
                 value = cell[0]
                 if value in (None, ""):
                     continue
-                try:
-                    number = float(value)
-                except (TypeError, ValueError):
+                parsed = self._parse_quantity_value(value)
+                if parsed is None:
                     valid_column = False
                     break
                 numeric_count += 1
-                if abs(number - round(number)) > 1e-6:
+                if abs(parsed - round(parsed)) > 1e-6:
                     decimal_count += 1
             if valid_column and numeric_count:
                 numeric_scores.append((col_idx, numeric_count, decimal_count))
-        if not numeric_scores:
+
+        def _select_best(scores: List[Tuple[int, int, int]]) -> Optional[int]:
+            if not scores:
+                return None
+            scores.sort(key=lambda item: (-item[1], item[2], item[0]))
+            return scores[0][0]
+
+        if header_candidates:
+            header_scores = [score for score in numeric_scores if score[0] in header_candidates]
+            selected = _select_best(header_scores)
+            if selected is not None:
+                return selected
+            # 如果表头标记了数量列但数据为空，直接返回表头候选项中的首个
+            return header_candidates[0]
+
+        return _select_best(numeric_scores)
+
+    def _parse_quantity_value(self, value) -> Optional[float]:
+        if value in (None, ""):
             return None
-        numeric_scores.sort(key=lambda item: (-item[1], item[2]))
-        return numeric_scores[0][0]
+        if isinstance(value, bool):
+            return float(value)
+        if isinstance(value, (int, float)):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not (number == number):  # NaN check
+                return None
+            return number
+        text = str(value).strip()
+        if not text:
+            return None
+        normalized = text.replace(",", "")
+        match = re.search(r"[-+]?\d+(?:\.\d+)?", normalized)
+        if not match:
+            return None
+        try:
+            return float(match.group())
+        except ValueError:
+            return None
 
     def _identify_part_column(self, ws: Worksheet) -> Optional[int]:
         candidate_scores: List[Tuple[int, int, int]] = []  # (idx, u_count, text_count)
