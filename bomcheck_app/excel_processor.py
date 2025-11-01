@@ -9,6 +9,7 @@ from openpyxl.cell.cell import Cell
 from openpyxl.styles import PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 
+from .binding_library import BindingChoice, BindingGroup, BindingLibrary
 from .binding_library import BindingGroup, BindingLibrary
 from .models import (
     BindingProjectResult,
@@ -29,6 +30,25 @@ def normalize_part_no(value: str) -> str:
 BLACK_FILL = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
 
 
+def _is_black_fill(cell: Cell) -> bool:
+    """判断单元格是否已被填充为黑色。"""
+    fill = cell.fill
+    if not fill or fill.fill_type != "solid":
+        return False
+    rgb = (fill.start_color.rgb or "").upper()
+    return rgb in {"000000", "FF000000"}
+
+
+def _row_has_non_black_value(row: Tuple[Cell, ...], ignore_idx: int) -> bool:
+    """判断当前行是否存在未被涂黑的非空单元格（用于识别已追加的新料号）。"""
+    for idx, cell in enumerate(row):
+        if idx == ignore_idx:
+            continue
+        if cell.value not in (None, "") and not _is_black_fill(cell):
+            return True
+    return False
+
+
 class ExcelProcessor:
     def __init__(self, config) -> None:
         self.config = config
@@ -36,6 +56,24 @@ class ExcelProcessor:
     def execute(self, excel_path: Path, binding_library: BindingLibrary) -> ExecutionResult:
         wb = load_workbook(excel_path)
 
+        for sheet_name in ("执行统计", "剩余物料"):
+            if sheet_name in wb.sheetnames:
+                del wb[sheet_name]
+
+        # 仅使用工作簿中的第一个工作表进行业务逻辑处理
+        data_sheets = wb.worksheets[:1]
+
+        debug_logs: List[str] = []
+
+        replacement_summary, replacement_debug = self._apply_replacements(data_sheets)
+        debug_logs.extend(replacement_debug)
+
+        (
+            part_quantities,
+            part_desc,
+            part_display,
+            quantity_debug,
+        ) = self._extract_part_quantities(data_sheets)
         debug_logs: List[str] = []
 
         replacement_summary, replacement_debug = self._apply_replacements(wb)
@@ -109,7 +147,7 @@ class ExcelProcessor:
             debug_logs=debug_logs,
         )
 
-    def _apply_replacements(self, wb) -> Tuple[ReplacementSummary, List[str]]:
+    def _apply_replacements(self, worksheets: List[Worksheet]) -> Tuple[ReplacementSummary, List[str]]:
         summary = ReplacementSummary()
         debug_logs: List[str] = []
 
@@ -130,6 +168,8 @@ class ExcelProcessor:
                     replacement_desc,
                 )
 
+        for ws in worksheets:
+            # 遍历目标工作表，高亮并记录命中的失效料号
         for ws in wb.worksheets:
             part_col_idx = self._identify_part_column(ws)
             debug_logs.append(f"[{ws.title}] 识别料号列: {self._format_column_debug(part_col_idx)}")
@@ -146,6 +186,15 @@ class ExcelProcessor:
                 part_no = str(cell_value).strip()
                 match = invalid_entries.get(normalize_part_no(part_no))
                 if not match:
+                    continue
+
+                part_cell = row[part_col_idx]
+                # 如果该行已经被涂黑并且存在未涂黑的新料号，则视为已处理过，统计后跳过
+                if _is_black_fill(part_cell) and _row_has_non_black_value(row, part_col_idx):
+                    summary.total_invalid_previously_marked += 1
+                    debug_logs.append(
+                        f"[{ws.title}] 行{row_idx} 失效料号 {part_no} 已标记且存在替换料号，跳过"
+                    )
                     continue
 
                 summary.total_invalid_found += 1
@@ -178,13 +227,21 @@ class ExcelProcessor:
         return summary, debug_logs
 
     def _extract_part_quantities(
-        self, wb
+        self,
+        worksheets: List[Worksheet],
     ) -> Tuple[Dict[str, float], Dict[str, str], Dict[str, str], List[str]]:
         part_quantities: Dict[str, float] = defaultdict(float)
         part_descriptions: Dict[str, str] = {}
         part_display: Dict[str, str] = {}
         debug_logs: List[str] = []
 
+        skip_titles = {"执行统计", "剩余物料"}
+
+        for ws in worksheets:
+            # 逐行累计第一个工作表中的库存数量与描述信息
+            if ws.title in skip_titles:
+                debug_logs.append(f"[{ws.title}] 已跳过汇总工作表")
+                continue
         for ws in wb.worksheets:
             qty_col_idx = self._identify_quantity_column(ws)
             part_col_idx = self._identify_part_column(ws)
@@ -330,6 +387,18 @@ class ExcelProcessor:
                 )
                 group_results.append(result)
 
+                if result.missing_qty > 0 and result.missing_choices:
+                    part_no = result.missing_choices[0]
+                    part_key = normalize_part_no(part_no)
+                    description = part_desc.get(part_key) or self._lookup_choice_desc(group, part_no)
+                    display_no = part_display.get(part_key, part_no)
+                    item = missing_items.setdefault(
+                        part_key,
+                        MissingItem(part_no=display_no, desc=description, missing_qty=0.0),
+                    )
+                    if not item.desc and description:
+                        item.desc = description
+                    item.missing_qty += result.missing_qty
                 if result.missing_qty > 0:
                     for part_no in result.missing_choices:
                         part_key = normalize_part_no(part_no)
@@ -374,12 +443,19 @@ class ExcelProcessor:
         required_qty = project_qty * base_requirement
         available_qty = 0.0
         fulfilled_qty = 0.0
+        matched_details: Dict[str, float] = {}
+        applicable_choices: List[Tuple[int, BindingChoice, str, float]] = []
+        fallback_choices: List[str] = []
+        first_applicable_part: Optional[str] = None
+
+        for idx, choice in enumerate(group.choices):
         missing_choices: List[str] = []
         matched_details: Dict[str, float] = {}
 
         for choice in group.choices:
             if not choice.part_no:
                 continue
+            fallback_choices.append(choice.part_no)
             if not self._choice_applicable(choice, reference_quantities):
                 continue
 
@@ -387,6 +463,14 @@ class ExcelProcessor:
             total_stock = reference_quantities.get(choice_key, 0.0)
             if total_stock > 0:
                 available_qty += total_stock
+            stock = max(available_inventory.get(choice_key, 0.0), 0.0)
+            applicable_choices.append((idx, choice, choice_key, stock))
+            if first_applicable_part is None:
+                first_applicable_part = choice.part_no
+
+        applicable_choices.sort(key=lambda item: (-item[3], item[0]))
+
+        for _idx, choice, choice_key, stock in applicable_choices:
 
             remaining_need = max(required_qty - fulfilled_qty, 0.0)
             if remaining_need <= 0:
@@ -394,9 +478,11 @@ class ExcelProcessor:
 
             stock = available_inventory.get(choice_key, 0.0)
             if stock <= 0:
-                if choice.part_no not in missing_choices:
-                    missing_choices.append(choice.part_no)
                 continue
+
+            remaining_need = max(required_qty - fulfilled_qty, 0.0)
+            if remaining_need <= 0:
+                break
 
             take_amount = min(stock, remaining_need)
             if take_amount <= 0:
@@ -407,6 +493,13 @@ class ExcelProcessor:
             fulfilled_qty += take_amount
             available_inventory[choice_key] = max(stock - take_amount, 0.0)
 
+        missing_qty = max(required_qty - fulfilled_qty, 0.0)
+        missing_choices: List[str] = []
+        if missing_qty > 0:
+            if first_applicable_part:
+                missing_choices = [first_applicable_part]
+            elif fallback_choices:
+                missing_choices = [fallback_choices[0]]
             if take_amount < remaining_need and choice.part_no not in missing_choices:
                 missing_choices.append(choice.part_no)
 
@@ -525,6 +618,10 @@ class ExcelProcessor:
 
         summary_ws = wb.create_sheet("执行统计")
         summary_ws.append(["失效料号数量", replacement_summary.total_invalid_found])
+        summary_ws.append([
+            "已标记失效料号数量",
+            replacement_summary.total_invalid_previously_marked,
+        ])
         summary_ws.append(["已替换数量", replacement_summary.total_replaced])
         summary_ws.append(["绑定项目数量", len(binding_results)])
         binding_group_count = sum(len(result.requirement_results) for result in binding_results)
