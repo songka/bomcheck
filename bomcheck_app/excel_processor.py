@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from collections import defaultdict
@@ -63,6 +64,17 @@ class ExcelProcessor:
         # 仅使用工作簿中的第一个工作表进行业务逻辑处理
         data_sheets = wb.worksheets[:1]
 
+        debug_logs: List[str] = []
+
+        replacement_summary, replacement_debug = self._apply_replacements(data_sheets)
+        debug_logs.extend(replacement_debug)
+
+        (
+            part_quantities,
+            part_desc,
+            part_display,
+            quantity_debug,
+        ) = self._extract_part_quantities(data_sheets)
         debug_logs: List[str] = []
 
         replacement_summary, replacement_debug = self._apply_replacements(data_sheets)
@@ -168,6 +180,7 @@ class ExcelProcessor:
                     replacement_desc,
                 )
 
+        for ws in worksheets:  # 遍历目标工作表，高亮并记录命中的失效料号
         for ws in worksheets:
             # 遍历目标工作表，高亮并记录命中的失效料号
         for ws in wb.worksheets:
@@ -237,6 +250,10 @@ class ExcelProcessor:
 
         skip_titles = {"执行统计", "剩余物料"}
 
+        for ws in worksheets:  # 逐行累计第一个工作表中的库存数量与描述信息
+            if ws.title in skip_titles:
+                debug_logs.append(f"[{ws.title}] 已跳过汇总工作表")
+                continue
         for ws in worksheets:
             # 逐行累计第一个工作表中的库存数量与描述信息
             if ws.title in skip_titles:
@@ -449,6 +466,12 @@ class ExcelProcessor:
         first_applicable_part: Optional[str] = None
 
         for idx, choice in enumerate(group.choices):
+        matched_details: Dict[str, float] = {}
+        applicable_choices: List[Tuple[int, BindingChoice, str, float]] = []
+        fallback_choices: List[str] = []
+        first_applicable_part: Optional[str] = None
+
+        for idx, choice in enumerate(group.choices):
         missing_choices: List[str] = []
         matched_details: Dict[str, float] = {}
 
@@ -493,6 +516,13 @@ class ExcelProcessor:
             fulfilled_qty += take_amount
             available_inventory[choice_key] = max(stock - take_amount, 0.0)
 
+        missing_qty = max(required_qty - fulfilled_qty, 0.0)
+        missing_choices: List[str] = []
+        if missing_qty > 0:
+            if first_applicable_part:
+                missing_choices = [first_applicable_part]
+            elif fallback_choices:
+                missing_choices = [fallback_choices[0]]
         missing_qty = max(required_qty - fulfilled_qty, 0.0)
         missing_choices: List[str] = []
         if missing_qty > 0:
