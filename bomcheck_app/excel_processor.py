@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 from math import isclose
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -50,7 +51,22 @@ def _row_has_non_black_value(row: Tuple[Cell, ...], ignore_idx: int) -> bool:
     return False
 
 
-def _format_quantity_cell(value):
+def _row_contains_part(row: Tuple[Cell, ...], ignore_idx: int, part_no: str) -> bool:
+    if not part_no:
+        return False
+    normalized_target = normalize_part_no(part_no)
+    for idx, cell in enumerate(row):
+        if idx == ignore_idx:
+            continue
+        value = cell.value
+        if not value:
+            continue
+        if normalize_part_no(str(value)) == normalized_target:
+            return True
+    return False
+
+
+def format_quantity_cell(value):
     if value in (None, ""):
         return ""
     if isinstance(value, (int, float)):
@@ -65,7 +81,7 @@ def _format_quantity_cell(value):
     return round(number, 4)
 
 
-def _format_quantity_text(value) -> str:
+def format_quantity_text(value) -> str:
     if value in (None, ""):
         return ""
     if isinstance(value, (int, float)):
@@ -79,6 +95,22 @@ def _format_quantity_text(value) -> str:
         return str(int(round(number)))
     text = f"{round(number, 4):g}"
     return text
+
+
+_PART_NO_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9._/-]*$")
+
+
+def _is_probable_part_number(value: str) -> bool:
+    normalized = normalize_part_no(value)
+    if not normalized:
+        return False
+    if not _PART_NO_PATTERN.fullmatch(normalized):
+        return False
+    if not any(ch.isdigit() for ch in normalized):
+        return False
+    if not any(ch.isalpha() for ch in normalized):
+        return False
+    return True
 
 
 class ExcelProcessor:
@@ -216,11 +248,10 @@ class ExcelProcessor:
 
                 part_cell = row[part_col_idx]
                 summary.total_invalid_found += 1
-                # 如果该行已经被涂黑并且存在未涂黑的新料号，则视为已处理过，统计后跳过
-                if _is_black_fill(part_cell) and _row_has_non_black_value(row, part_col_idx):
+                if self._row_already_replaced(row, part_col_idx, part_cell, replacement_no):
                     summary.total_invalid_previously_marked += 1
                     debug_logs.append(
-                        f"[{ws.title}] 行{row_idx} 失效料号 {part_no} 已标记且存在替换料号，跳过"
+                        f"[{ws.title}] 行{row_idx} 失效料号 {part_no} 已标记替换，跳过"
                     )
                     continue
 
@@ -252,6 +283,77 @@ class ExcelProcessor:
 
         return summary, debug_logs
 
+    def _row_already_replaced(
+        self,
+        row: Tuple[Cell, ...],
+        part_col_idx: int,
+        part_cell: Cell,
+        replacement_no: Optional[str],
+    ) -> bool:
+        if replacement_no and _row_contains_part(row, part_col_idx, replacement_no):
+            return True
+        if _is_black_fill(part_cell):
+            if _row_has_non_black_value(row, part_col_idx):
+                return True
+            if not replacement_no:
+                return True
+        return False
+
+    def _find_replacement_in_row(
+        self, row: Tuple[Cell, ...], part_col_idx: int
+    ) -> Optional[Tuple[str, str, Optional[str]]]:
+        for idx, cell in enumerate(row):
+            if idx == part_col_idx:
+                continue
+            value = cell.value
+            if value in (None, ""):
+                continue
+            if isinstance(value, (int, float)):
+                continue
+            text = str(value).strip()
+            if not text:
+                continue
+            if not _is_probable_part_number(text):
+                continue
+            if _is_black_fill(cell):
+                continue
+            normalized = normalize_part_no(text)
+            desc_value: Optional[str] = None
+            if idx + 1 < len(row):
+                desc_cell = row[idx + 1]
+                if desc_cell.value not in (None, ""):
+                    desc_value = str(desc_cell.value).strip()
+            return text, normalized, desc_value
+        return None
+
+    def _resolve_row_part(
+        self, row: Tuple[Cell, ...], part_col_idx: int
+    ) -> Optional[Tuple[str, str, Optional[str]]]:
+        part_cell = row[part_col_idx]
+        raw_value = part_cell.value
+        text = str(raw_value).strip() if raw_value not in (None, "") else ""
+
+        if text and not _is_black_fill(part_cell) and _is_probable_part_number(text):
+            normalized = normalize_part_no(text)
+            return normalized, text, None
+
+        replacement = self._find_replacement_in_row(row, part_col_idx)
+        if replacement:
+            display_no, normalized, desc_value = replacement
+            return normalized, display_no, desc_value
+
+        if text and not _is_probable_part_number(text):
+            return None
+
+        if _is_black_fill(part_cell):
+            return None
+
+        if text:
+            normalized = normalize_part_no(text)
+            return normalized, text, None
+
+        return None
+
     def _extract_part_quantities(
         self,
         worksheets: List[Worksheet],
@@ -281,22 +383,26 @@ class ExcelProcessor:
                 if part_col_idx >= len(row):
                     continue
 
-                part_cell = row[part_col_idx]
-                if not part_cell.value:
+                resolved = self._resolve_row_part(row, part_col_idx)
+                if not resolved:
                     continue
 
-                part_no = str(part_cell.value).strip()
-                if not part_no:
-                    continue
+                normalized_part, display_no, override_desc = resolved
+                part_display.setdefault(normalized_part, display_no)
 
-                normalized_part = normalize_part_no(part_no)
-                part_display.setdefault(normalized_part, part_no)
-
-                desc_cell = row[part_col_idx + 1] if desc_col_idx is None and part_col_idx + 1 < len(row) else None
-                if desc_col_idx is not None and desc_col_idx < len(row):
-                    desc_cell = row[desc_col_idx]
-                if desc_cell and desc_cell.value:
-                    part_descriptions.setdefault(normalized_part, str(desc_cell.value).strip())
+                desc_value: Optional[str] = override_desc
+                if not desc_value:
+                    desc_cell = (
+                        row[part_col_idx + 1]
+                        if desc_col_idx is None and part_col_idx + 1 < len(row)
+                        else None
+                    )
+                    if desc_col_idx is not None and desc_col_idx < len(row):
+                        desc_cell = row[desc_col_idx]
+                    if desc_cell and desc_cell.value:
+                        desc_value = str(desc_cell.value).strip()
+                if desc_value:
+                    part_descriptions.setdefault(normalized_part, desc_value)
 
                 quantity = 1.0
                 if qty_col_idx is not None and qty_col_idx < len(row):
@@ -459,13 +565,16 @@ class ExcelProcessor:
         applicable_choices: List[Tuple[int, BindingChoice, str, float]] = []
         fallback_choices: List[str] = []
         first_applicable_part: Optional[str] = None
+        requirement_enabled = False
 
         for idx, choice in enumerate(group.choices):
             if not choice.part_no:
                 continue
-            fallback_choices.append(choice.part_no)
-            if not self._choice_applicable(choice, reference_quantities):
+            if not self._choice_condition_met(choice, reference_quantities):
                 continue
+
+            requirement_enabled = True
+            fallback_choices.append(choice.part_no)
 
             choice_key = normalize_part_no(choice.part_no)
             total_stock = reference_quantities.get(choice_key, 0.0)
@@ -475,6 +584,16 @@ class ExcelProcessor:
             applicable_choices.append((idx, choice, choice_key, stock))
             if first_applicable_part is None:
                 first_applicable_part = choice.part_no
+
+        if not requirement_enabled:
+            return RequirementGroupResult(
+                group_name=group.group_name,
+                required_qty=0.0,
+                available_qty=0.0,
+                missing_qty=0.0,
+                missing_choices=[],
+                matched_details={},
+            )
 
         applicable_choices.sort(key=lambda item: (-item[3], item[0]))
 
@@ -521,15 +640,29 @@ class ExcelProcessor:
                 return choice.desc
         return ""
 
-    def _choice_applicable(self, choice, part_quantities: Dict[str, float]) -> bool:
+    def _choice_condition_met(self, choice, part_quantities: Dict[str, float]) -> bool:
         mode = (choice.condition_mode or "").upper()
-        condition_keys = [normalize_part_no(part_no) for part_no in choice.condition_part_nos]
+        if not mode:
+            return True
+
+        condition_keys = [
+            normalize_part_no(part_no)
+            for part_no in choice.condition_part_nos
+            if part_no not in (None, "")
+        ]
+        if not condition_keys:
+            return False
+
+        def _has_part(part_no: str) -> bool:
+            quantity = part_quantities.get(part_no, 0.0)
+            return bool(quantity and quantity > 0)
+
         if mode == "ALL":
-            return all(part_quantities.get(part_no) for part_no in condition_keys)
+            return all(_has_part(part_no) for part_no in condition_keys)
         if mode == "ANY":
-            return any(part_quantities.get(part_no) for part_no in condition_keys)
+            return any(_has_part(part_no) for part_no in condition_keys)
         if mode == "NOTANY":
-            return not any(part_quantities.get(part_no) for part_no in condition_keys)
+            return not any(_has_part(part_no) for part_no in condition_keys)
         return True
 
     def _scan_important_materials(
@@ -658,18 +791,18 @@ class ExcelProcessor:
         for result in binding_results:
             for group_result in result.requirement_results:
                 matched_parts_text = ",".join(
-                    f"{part}:{_format_quantity_text(qty)}"
+                    f"{part}:{format_quantity_text(qty)}"
                     for part, qty in group_result.matched_details.items()
                 )
                 summary_ws.append(
                     [
                         result.project_desc,
                         result.index_part_no,
-                        _format_quantity_cell(result.matched_quantity),
+                        format_quantity_cell(result.matched_quantity),
                         group_result.group_name,
-                        _format_quantity_cell(group_result.required_qty),
-                        _format_quantity_cell(group_result.available_qty),
-                        _format_quantity_cell(group_result.missing_qty),
+                        format_quantity_cell(group_result.required_qty),
+                        format_quantity_cell(group_result.available_qty),
+                        format_quantity_cell(group_result.missing_qty),
                         ",".join(group_result.missing_choices),
                         matched_parts_text,
                     ]
@@ -680,7 +813,7 @@ class ExcelProcessor:
         summary_ws.append(["料号", "描述", "缺少数量"])
         for item in missing_items:
             summary_ws.append(
-                [item.part_no, item.desc, _format_quantity_cell(item.missing_qty)]
+                [item.part_no, item.desc, format_quantity_cell(item.missing_qty)]
             )
 
         summary_ws.append([])
@@ -688,14 +821,14 @@ class ExcelProcessor:
         summary_ws.append(["关键字", "标准关键字", "数量", "命中料号"])
         for hit in important_hits:
             matched_text = ",".join(
-                f"{part}:{_format_quantity_text(qty)}"
+                f"{part}:{format_quantity_text(qty)}"
                 for part, qty in hit.matched_parts.items()
             )
             summary_ws.append(
                 [
                     hit.keyword,
                     hit.converted_keyword,
-                    _format_quantity_cell(hit.total_quantity),
+                    format_quantity_cell(hit.total_quantity),
                     matched_text,
                 ]
             )
@@ -712,7 +845,7 @@ class ExcelProcessor:
                 [
                     part_display.get(key, key),
                     part_descriptions.get(key, ""),
-                    _format_quantity_cell(part_quantities.get(key, 0.0)),
+                    format_quantity_cell(part_quantities.get(key, 0.0)),
                 ]
             )
 
