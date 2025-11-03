@@ -457,11 +457,6 @@ class ExcelProcessor:
             integer_count = 0
             failure_count = 0
             total_count = 0
-        numeric_scores: List[Tuple[int, int, int]] = []  # (col_idx, numeric_count, decimal_count)
-        for col_idx in range(ws.max_column):
-            numeric_count = 0
-            decimal_count = 0
-            valid_column = True
             for cell in ws.iter_rows(
                 min_row=2,
                 min_col=col_idx + 1,
@@ -491,20 +486,6 @@ class ExcelProcessor:
                 return None
             # 优先选择转换后整数数量最多的列，再比较可解析数量、失败数量以及列索引确保稳定。
             scores.sort(key=lambda item: (-item[1], -item[2], item[3], item[0]))
-                parsed = self._parse_quantity_value(value)
-                if parsed is None:
-                    valid_column = False
-                    break
-                numeric_count += 1
-                if abs(parsed - round(parsed)) > 1e-6:
-                    decimal_count += 1
-            if valid_column and numeric_count:
-                numeric_scores.append((col_idx, numeric_count, decimal_count))
-
-        def _select_best(scores: List[Tuple[int, int, int]]) -> Optional[int]:
-            if not scores:
-                return None
-            scores.sort(key=lambda item: (-item[1], item[2], item[0]))
             return scores[0][0]
 
         if header_candidates:
