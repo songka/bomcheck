@@ -183,9 +183,7 @@ class ExcelProcessor:
         debug_logs.extend(important_debug)
 
         important_rows = []
-        for part_no in sorted(
-            important_part_numbers, key=lambda key: part_display.get(key, key)
-        ):
+        for part_no in important_part_numbers:
             qty = available_inventory.get(part_no, 0.0)
             if qty <= 0:
                 continue
@@ -196,6 +194,8 @@ class ExcelProcessor:
                     qty,
                 )
             )
+
+        important_rows.sort(key=lambda item: (-item[2], item[0]))
 
         remainder_rows = []
         for part_no, qty in available_inventory.items():
@@ -213,7 +213,7 @@ class ExcelProcessor:
                 )
             )
 
-        remainder_rows.sort(key=lambda item: item[0])
+        remainder_rows.sort(key=lambda item: (-item[2], item[0]))
 
         self._write_result_sheets(
             wb,
@@ -859,6 +859,8 @@ class ExcelProcessor:
             del wb["执行统计"]
         if "剩余物料" in wb.sheetnames:
             del wb["剩余物料"]
+        if "重要物料" in wb.sheetnames:
+            del wb["重要物料"]
 
         summary_ws = wb.create_sheet("执行统计")
         summary_ws.append(["失效料号数量", replacement_summary.total_invalid_found])
@@ -958,8 +960,13 @@ class ExcelProcessor:
         for line in debug_logs:
             summary_ws.append([line])
 
+        important_ws = wb.create_sheet("重要物料")
+        important_ws.append(["料号", "描述", "剩余数量"])
+        for part_no, desc, qty in important_part_rows:
+            important_ws.append([part_no, desc, format_quantity_cell(qty)])
+
         remainder_ws = wb.create_sheet("剩余物料")
-        remainder_ws.append(["料号", "描述", "数量"])
+        remainder_ws.append(["料号", "描述", "剩余数量"])
         for part_no, desc, qty in remainder_rows:
             remainder_ws.append([part_no, desc, format_quantity_cell(qty)])
 
