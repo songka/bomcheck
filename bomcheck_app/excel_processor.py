@@ -165,6 +165,7 @@ class ExcelProcessor:
             binding_results,
             missing_items,
             used_part_numbers,
+            index_consumption,
             binding_debug,
         ) = self._evaluate_binding_requirements(
             part_quantities,
@@ -174,6 +175,13 @@ class ExcelProcessor:
             binding_library,
         )
         debug_logs.extend(binding_debug)
+
+        if index_consumption:
+            for part_no, consumed_qty in index_consumption.items():
+                if consumed_qty <= 0:
+                    continue
+                remaining = max(available_inventory.get(part_no, 0.0) - consumed_qty, 0.0)
+                available_inventory[part_no] = remaining
 
         important_hits, important_part_numbers, important_debug = self._scan_important_materials(
             available_inventory,
@@ -594,10 +602,17 @@ class ExcelProcessor:
         part_desc: Dict[str, str],
         part_display: Dict[str, str],
         binding_library: BindingLibrary,
-    ) -> Tuple[List[BindingProjectResult], List[MissingItem], set[str], List[str]]:
+    ) -> Tuple[
+        List[BindingProjectResult],
+        List[MissingItem],
+        set[str],
+        Dict[str, float],
+        List[str],
+    ]:
         results: List[BindingProjectResult] = []
         missing_items: Dict[str, MissingItem] = {}
         used_parts: set[str] = set()
+        index_consumption: Dict[str, float] = defaultdict(float)
         debug_logs: List[str] = []
 
         for project in binding_library.iter_projects():
@@ -611,7 +626,8 @@ class ExcelProcessor:
                 continue
 
             consumption_qty = min(project_qty, available_index_qty)
-            available_inventory[index_key] = max(available_index_qty - consumption_qty, 0.0)
+            if consumption_qty > 0:
+                index_consumption[index_key] += consumption_qty
             used_parts.add(index_key)
 
             debug_logs.append(
@@ -654,7 +670,7 @@ class ExcelProcessor:
                 )
             )
 
-        return results, list(missing_items.values()), used_parts, debug_logs
+        return results, list(missing_items.values()), used_parts, index_consumption, debug_logs
 
     def _evaluate_group(
         self,
