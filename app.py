@@ -109,6 +109,26 @@ class Application:
             self._update_result_box("\n".join(summary_lines), success=success)
         finally:
             self.root.after(0, self._on_execution_complete)
+
+    def _on_execution_complete(self) -> None:
+        if hasattr(self, "execute_button"):
+            self.execute_button.config(state="normal")
+        if self._execution_lock.locked():
+            self._execution_lock.release()
+        self._execution_thread = None
+
+    def _update_result_box(self, message: str, success: bool) -> None:
+        def update():
+            self.result_text.delete(1.0, END)
+            self.result_text.insert(END, message)
+            self.result_text.configure(bg="#d4edda" if success else "#f8d7da")
+
+        self.root.after(0, update)
+
+    def _handle_save_error(self, error: SaveWorkbookError) -> None:
+        decision_event = threading.Event()
+        default_extension = error.path.suffix or ".xlsx"
+
             binding_group_count = sum(len(res.requirement_results) for res in result.binding_results)
             lines = [
                 f"失效料号数量：{format_quantity_text(result.replacement_summary.total_invalid_found)}",
@@ -188,20 +208,88 @@ class Application:
         return lines
 
     def _summarize_binding_results(self, result: ExecutionResult) -> list[str]:
+        binding_group_count = sum(
+            len(res.requirement_results) for res in result.binding_results
+        )
         binding_group_count = sum(len(res.requirement_results) for res in result.binding_results)
         lines = [
             "",
-            f"绑定料号统计：找到 {format_quantity_text(len(result.binding_results))} 组项目，需求分组 {format_quantity_text(binding_group_count)} 组",
+            (
+                "绑定料号统计：找到 "
+                f"{format_quantity_text(len(result.binding_results))} 组项目，"
+                f"需求分组 {format_quantity_text(binding_group_count)} 组"
+            ),
         ]
         if not result.binding_results:
             lines.append("（未找到匹配的绑定项目）")
             return lines
 
         for binding_result in result.binding_results:
-            lines.append(
-                f"- {binding_result.project_desc} ({binding_result.index_part_no})，主料数量：{format_quantity_text(binding_result.matched_quantity)}"
+            project_header = (
+                f"- {binding_result.project_desc} ({binding_result.index_part_no})，"
+                f"主料数量：{format_quantity_text(binding_result.matched_quantity)}"
             )
+            lines.append(project_header)
+
             for group_result in binding_result.requirement_results:
+                group_line = (
+                    "  · "
+                    + f"{group_result.group_name}：需求 {format_quantity_text(group_result.required_qty)}，"
+                    + f"可用 {format_quantity_text(group_result.available_qty)}，"
+                    + f"缺少 {format_quantity_text(group_result.missing_qty)}"
+                )
+                lines.append(group_line)
+
+                if group_result.matched_details:
+                    matched_pairs = [
+                        f"{part}:{format_quantity_text(qty)}"
+                        for part, qty in group_result.matched_details.items()
+                    ]
+                    lines.append("    满足料号：" + ", ".join(matched_pairs))
+
+                if group_result.missing_choices:
+                    lines.append(
+                        "    缺少料号：" + ", ".join(group_result.missing_choices)
+                    )
+
+        return lines
+
+    def _summarize_missing_items(self, result: ExecutionResult) -> list[str]:
+        if not result.missing_items:
+            return []
+
+        lines = ["", "缺失物料："]
+        for item in result.missing_items:
+            lines.append(
+                f"- {item.part_no} {item.desc} 缺少 {format_quantity_text(item.missing_qty)}"
+            )
+        return lines
+
+    def _summarize_important_hits(self, result: ExecutionResult) -> list[str]:
+        lines = [
+            "",
+            f"重要物料统计：找到 {format_quantity_text(len(result.important_hits))} 组",
+        ]
+        if not result.important_hits:
+            lines.append("（无重要物料命中）")
+            return lines
+
+        for hit in result.important_hits:
+            lines.append(
+                f"- {hit.keyword}（{hit.converted_keyword}）：{format_quantity_text(hit.total_quantity)}"
+            )
+            if hit.matched_parts:
+                matched_text = ", ".join(
+                    f"{part}:{format_quantity_text(qty)}"
+                    for part, qty in hit.matched_parts.items()
+                )
+                lines.append(f"    命中料号：{matched_text}")
+        return lines
+
+    def _summarize_debug_logs(self, result: ExecutionResult) -> list[str]:
+        if not result.debug_logs:
+            return []
+
                 lines.append(
                     f"- {binding_result.project_desc} ({binding_result.index_part_no})，主料数量：{format_quantity_text(binding_result.matched_quantity)}"
                 )
