@@ -235,6 +235,22 @@ class Application:
         if not result.important_hits:
             lines.append("（无重要物料命中）")
             return lines
+
+        for hit in result.important_hits:
+            lines.append(
+                f"- {hit.keyword}（{hit.converted_keyword}）：{format_quantity_text(hit.total_quantity)}"
+            )
+            if hit.matched_parts:
+                matched_text = ", ".join(
+                    f"{part}:{format_quantity_text(qty)}"
+                    for part, qty in hit.matched_parts.items()
+                )
+                lines.append(f"    命中料号：{matched_text}")
+        return lines
+
+    def _summarize_debug_logs(self, result: ExecutionResult) -> list[str]:
+        if not result.debug_logs:
+            return []
                     if group_result.matched_details:
                         matched_text = ", ".join(
                             f"{part}:{format_quantity_text(qty)}"
@@ -333,8 +349,7 @@ class Application:
         self.root.after(0, prompt)
         decision_event.wait()
 
-    def _open_binding_editor(self) -> None:
-        BindingEditor(self.root, self.binding_library)
+        return ["", "调试信息：", *[f"- {log}" for log in result.debug_logs]]
 
 
 class BindingEditor:
@@ -366,7 +381,6 @@ class BindingEditor:
             activestyle="none",
             selectmode="browse",
         )
-        self.project_list = Listbox(project_frame, exportselection=False, height=15)
         self.project_list.pack(fill=Y, expand=True)
         self.project_list.bind("<<ListboxSelect>>", lambda _event: self._on_project_select())
         Button(project_frame, text="新增项目", command=self._add_project).pack(fill=BOTH, pady=2)
@@ -406,7 +420,6 @@ class BindingEditor:
             activestyle="none",
             selectmode="browse",
         )
-        self.group_list = Listbox(group_left, exportselection=False, height=10)
         self.group_list.pack(fill=Y, expand=True)
         self.group_list.bind("<<ListboxSelect>>", lambda _event: self._on_group_select())
         Button(group_left, text="新增分组", command=self._add_group).pack(fill=BOTH, pady=2)
