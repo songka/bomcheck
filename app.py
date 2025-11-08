@@ -40,6 +40,8 @@ class Application:
         self.binding_library.load()
         self.processor = ExcelProcessor(self.config)
         self.selected_file: Path | None = None
+        self._execution_lock = threading.Lock()
+        self._execution_thread: threading.Thread | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -53,7 +55,8 @@ class Application:
 
         action_frame = Frame(self.root)
         action_frame.pack(fill=BOTH, padx=10, pady=5)
-        Button(action_frame, text="执行", command=self._execute).pack(side=LEFT)
+        self.execute_button = Button(action_frame, text="执行", command=self._execute)
+        self.execute_button.pack(side=LEFT)
         Button(action_frame, text="编辑绑定料号", command=self._open_binding_editor).pack(side=LEFT, padx=5)
 
         result_frame = Frame(self.root)
@@ -80,11 +83,35 @@ class Application:
         if not self.selected_file:
             messagebox.showerror("错误", "请先选择Excel文件")
             return
+        if not self._execution_lock.acquire(blocking=False):
+            messagebox.showinfo("处理中", "上一轮执行尚未完成，请稍候再试。")
+            return
+        self.execute_button.config(state="disabled")
         thread = threading.Thread(target=self._run_execution, daemon=True)
+        self._execution_thread = thread
         thread.start()
 
     def _run_execution(self) -> None:
         try:
+            try:
+                result = self.processor.execute(self.selected_file, self.binding_library)
+            except SaveWorkbookError as error:
+                result = error.result
+                self._handle_save_error(error)
+            except Exception as exc:  # pragma: no cover - runtime safety
+                traceback.print_exc()
+                self._update_result_box(f"执行失败：{exc}\n{traceback.format_exc()}", success=False)
+                return
+
+            binding_group_count = sum(len(res.requirement_results) for res in result.binding_results)
+            lines = [
+                f"失效料号数量：{format_quantity_text(result.replacement_summary.total_invalid_found)}",
+                f"已标记失效料号数量：{format_quantity_text(result.replacement_summary.total_invalid_previously_marked)}",
+                f"已替换数量：{format_quantity_text(result.replacement_summary.total_replaced)}",
+                "",
+                f"绑定料号统计：找到 {format_quantity_text(len(result.binding_results))} 组项目，需求分组 {format_quantity_text(binding_group_count)} 组",
+            ]
+            for binding_result in result.binding_results:
             result = self.processor.execute(self.selected_file, self.binding_library)
         except SaveWorkbookError as error:
             result = error.result
@@ -108,51 +135,64 @@ class Application:
             )
             for group_result in binding_result.requirement_results:
                 lines.append(
-                    "  · "
-                    + f"{group_result.group_name}：需求 {format_quantity_text(group_result.required_qty)}，"
-                    + f"可用 {format_quantity_text(group_result.available_qty)}，缺少 {format_quantity_text(group_result.missing_qty)}"
+                    f"- {binding_result.project_desc} ({binding_result.index_part_no})，主料数量：{format_quantity_text(binding_result.matched_quantity)}"
                 )
-                if group_result.matched_details:
-                    matched_text = ", ".join(
-                        f"{part}:{format_quantity_text(qty)}"
-                        for part, qty in group_result.matched_details.items()
+                for group_result in binding_result.requirement_results:
+                    lines.append(
+                        "  · "
+                        + f"{group_result.group_name}：需求 {format_quantity_text(group_result.required_qty)}，"
+                        + f"可用 {format_quantity_text(group_result.available_qty)}，缺少 {format_quantity_text(group_result.missing_qty)}"
                     )
-                    lines.append(f"    满足料号：{matched_text}")
-                if group_result.missing_choices:
-                    lines.append(f"    缺少料号：{', '.join(group_result.missing_choices)}")
-        if not result.binding_results:
-            lines.append("（未找到匹配的绑定项目）")
-        if result.missing_items:
-            lines.append("")
-            lines.append("缺失物料：")
-            for item in result.missing_items:
-                lines.append(
-                    f"- {item.part_no} {item.desc} 缺少 {format_quantity_text(item.missing_qty)}"
-                )
-        lines.append("")
-        lines.append(
-            f"重要物料统计：找到 {format_quantity_text(len(result.important_hits))} 组"
-        )
-        if result.important_hits:
-            for hit in result.important_hits:
-                lines.append(
-                    f"- {hit.keyword}（{hit.converted_keyword}）：{format_quantity_text(hit.total_quantity)}"
-                )
-                if hit.matched_parts:
-                    matched_text = ", ".join(
-                        f"{part}:{format_quantity_text(qty)}"
-                        for part, qty in hit.matched_parts.items()
+                    if group_result.matched_details:
+                        matched_text = ", ".join(
+                            f"{part}:{format_quantity_text(qty)}"
+                            for part, qty in group_result.matched_details.items()
+                        )
+                        lines.append(f"    满足料号：{matched_text}")
+                    if group_result.missing_choices:
+                        lines.append(f"    缺少料号：{', '.join(group_result.missing_choices)}")
+            if not result.binding_results:
+                lines.append("（未找到匹配的绑定项目）")
+            if result.missing_items:
+                lines.append("")
+                lines.append("缺失物料：")
+                for item in result.missing_items:
+                    lines.append(
+                        f"- {item.part_no} {item.desc} 缺少 {format_quantity_text(item.missing_qty)}"
                     )
-                    lines.append(f"    命中料号：{matched_text}")
-        else:
-            lines.append("（无重要物料命中）")
-        if result.debug_logs:
             lines.append("")
-            lines.append("调试信息：")
-            for log in result.debug_logs:
-                lines.append(f"- {log}")
-        success = not result.has_missing
-        self._update_result_box("\n".join(lines), success=success)
+            lines.append(
+                f"重要物料统计：找到 {format_quantity_text(len(result.important_hits))} 组"
+            )
+            if result.important_hits:
+                for hit in result.important_hits:
+                    lines.append(
+                        f"- {hit.keyword}（{hit.converted_keyword}）：{format_quantity_text(hit.total_quantity)}"
+                    )
+                    if hit.matched_parts:
+                        matched_text = ", ".join(
+                            f"{part}:{format_quantity_text(qty)}"
+                            for part, qty in hit.matched_parts.items()
+                        )
+                        lines.append(f"    命中料号：{matched_text}")
+            else:
+                lines.append("（无重要物料命中）")
+            if result.debug_logs:
+                lines.append("")
+                lines.append("调试信息：")
+                for log in result.debug_logs:
+                    lines.append(f"- {log}")
+            success = not result.has_missing
+            self._update_result_box("\n".join(lines), success=success)
+        finally:
+            self.root.after(0, self._on_execution_complete)
+
+    def _on_execution_complete(self) -> None:
+        if hasattr(self, "execute_button"):
+            self.execute_button.config(state="normal")
+        if self._execution_lock.locked():
+            self._execution_lock.release()
+        self._execution_thread = None
 
     def _update_result_box(self, message: str, success: bool) -> None:
         def update():
