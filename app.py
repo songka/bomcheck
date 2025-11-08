@@ -50,9 +50,11 @@ class Application:
         config_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
 
         Label(config_frame, text="配置文件：").pack(side=LEFT)
-        self.config_entry = Entry(config_frame, width=50)
+        self.config_entry = Entry(config_frame, width=50, state="readonly")
         self.config_entry.pack(side=LEFT, padx=5)
-        Button(config_frame, text="浏览", command=self._choose_config).pack(side=LEFT)
+        Button(config_frame, text="编辑数据文件", command=self._open_data_file_editor).pack(
+            side=LEFT
+        )
         Button(config_frame, text="重新加载", command=self._reload_config).pack(side=LEFT, padx=5)
 
         file_frame = Frame(self.root)
@@ -98,22 +100,10 @@ class Application:
 
     def _refresh_config_entry(self) -> None:
         if hasattr(self, "config_entry"):
+            self.config_entry.config(state="normal")
             self.config_entry.delete(0, END)
             self.config_entry.insert(0, str(self.config_path))
-
-    def _choose_config(self) -> None:
-        file_path = filedialog.askopenfilename(
-            filetypes=[("JSON", "*.json"), ("所有文件", "*.*")]
-        )
-        if not file_path:
-            return
-
-        try:
-            self._apply_config(Path(file_path))
-        except Exception as exc:  # pragma: no cover - user feedback
-            messagebox.showerror("加载失败", f"读取配置文件失败：{exc}")
-        else:
-            messagebox.showinfo("配置已更新", f"当前配置文件：{file_path}")
+            self.config_entry.config(state="readonly")
 
     def _reload_config(self) -> None:
         try:
@@ -122,6 +112,23 @@ class Application:
             messagebox.showerror("加载失败", f"重新加载配置失败：{exc}")
         else:
             messagebox.showinfo("配置已更新", f"已重新加载：{self.config_path}")
+
+    def _open_data_file_editor(self) -> None:
+        DataFileEditor(
+            self.root,
+            self.config,
+            self.config_path.parent,
+            self._handle_data_file_save,
+        )
+
+    def _handle_data_file_save(self, new_config: AppConfig) -> None:
+        try:
+            save_config(self.config_path, new_config)
+            self._apply_config(self.config_path)
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("保存失败", f"更新配置失败：{exc}")
+        else:
+            messagebox.showinfo("配置已更新", "数据文件路径已更新。")
 
     def _choose_file(self) -> None:
         file_path = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx"), ("Excel", "*.xlsm")])
@@ -306,6 +313,118 @@ class Application:
             return []
 
         return ["", "调试信息：", *[f"- {log}" for log in result.debug_logs]]
+
+
+class DataFileEditor:
+    def __init__(
+        self,
+        master,
+        config: AppConfig,
+        base_dir: Path,
+        on_save: Callable[[AppConfig], None],
+    ) -> None:
+        self.base_dir = base_dir
+        self.on_save = on_save
+        self.top = Toplevel(master)
+        self.top.title("数据文件设置")
+        self.top.transient(master)
+        self.top.grab_set()
+
+        self.invalid_var = StringVar(value=str(config.invalid_part_db))
+        self.binding_var = StringVar(value=str(config.binding_library))
+        self.important_var = StringVar(value=str(config.important_materials))
+
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        frame = Frame(self.top)
+        frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
+
+        self._build_file_selector(
+            frame,
+            row=0,
+            label_text="失效料号数据库：",
+            text_var=self.invalid_var,
+            filetypes=[("Excel", "*.xlsx"), ("Excel", "*.xlsm"), ("所有文件", "*.*")],
+        )
+        self._build_file_selector(
+            frame,
+            row=1,
+            label_text="绑定料号数据库：",
+            text_var=self.binding_var,
+            filetypes=[("绑定库", "*.js *.json"), ("所有文件", "*.*")],
+        )
+        self._build_file_selector(
+            frame,
+            row=2,
+            label_text="重要物料清单：",
+            text_var=self.important_var,
+            filetypes=[("文本", "*.txt"), ("所有文件", "*.*")],
+        )
+
+        button_frame = Frame(self.top)
+        button_frame.pack(fill=BOTH, pady=(0, 10))
+        Button(button_frame, text="保存", command=self._on_save).pack(side=LEFT, padx=10)
+        Button(button_frame, text="取消", command=self.top.destroy).pack(side=LEFT)
+
+    def _build_file_selector(
+        self,
+        frame: Frame,
+        *,
+        row: int,
+        label_text: str,
+        text_var: StringVar,
+        filetypes: list[tuple[str, str]],
+    ) -> None:
+        Label(frame, text=label_text).grid(row=row, column=0, sticky="w", pady=5)
+        entry = Entry(frame, textvariable=text_var, width=50)
+        entry.grid(row=row, column=1, padx=5, sticky="ew")
+        Button(
+            frame,
+            text="浏览",
+            command=lambda var=text_var, types=filetypes: self._choose_file(var, types),
+        ).grid(row=row, column=2)
+        frame.columnconfigure(1, weight=1)
+
+    def _choose_file(
+        self, var: StringVar, filetypes: list[tuple[str, str]]
+    ) -> None:  # pragma: no cover - user interaction
+        file_path = filedialog.askopenfilename(filetypes=filetypes)
+        if file_path:
+            var.set(file_path)
+
+    def _on_save(self) -> None:
+        invalid_path = self.invalid_var.get().strip()
+        binding_path = self.binding_var.get().strip()
+        important_path = self.important_var.get().strip()
+
+        if not invalid_path or not binding_path:
+            messagebox.showerror("保存失败", "请完整填写数据库文件路径。")
+            return
+        if not important_path:
+            messagebox.showerror("保存失败", "请填写重要物料清单路径。")
+            return
+
+        new_config = AppConfig(
+            invalid_part_db=self._normalize_path(invalid_path),
+            binding_library=self._normalize_path(binding_path),
+            important_materials=self._normalize_path(important_path),
+        )
+
+        try:
+            self.on_save(new_config)
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("保存失败", f"无法更新配置：{exc}")
+            return
+
+        self.top.destroy()
+
+    def _normalize_path(self, raw_path: str) -> Path:
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = self.base_dir / path
+        return path
+
 
 class BindingEditor:
     CONDITION_MODE_OPTIONS = ("", "ALL", "ANY", "NOTANY")
