@@ -120,13 +120,15 @@ class ExcelProcessor:
     def execute(self, excel_path: Path, binding_library: BindingLibrary) -> ExecutionResult:
         wb = load_workbook(excel_path)
 
-        for sheet_name in ("执行统计", "剩余物料"):
+        result_sheet_names = {"执行统计", "剩余物料", "重要物料"}
+
+        for sheet_name in result_sheet_names:
             if sheet_name in wb.sheetnames:
                 del wb[sheet_name]
 
         # 使用除结果汇总外的所有工作表参与业务处理
         data_sheets = [
-            ws for ws in wb.worksheets if ws.title not in {"执行统计", "剩余物料"}
+            ws for ws in wb.worksheets if ws.title not in result_sheet_names
         ]
 
         debug_logs: List[str] = []
@@ -400,7 +402,7 @@ class ExcelProcessor:
         part_display: Dict[str, str] = {}
         debug_logs: List[str] = []
 
-        skip_titles = {"执行统计", "剩余物料"}
+        skip_titles = {"执行统计", "剩余物料", "重要物料"}
 
         for ws in worksheets:  # 逐行累计第一个工作表中的库存数量与描述信息
             if ws.title in skip_titles:
