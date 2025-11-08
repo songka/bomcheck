@@ -197,6 +197,8 @@ class BindingEditor:
         self.project_list.bind("<<ListboxSelect>>", lambda _event: self._on_project_select())
         Button(project_frame, text="新增项目", command=self._add_project).pack(fill=BOTH, pady=2)
         Button(project_frame, text="删除项目", command=self._remove_project).pack(fill=BOTH, pady=2)
+        Button(project_frame, text="上移", command=lambda: self._move_project(-1)).pack(fill=BOTH, pady=2)
+        Button(project_frame, text="下移", command=lambda: self._move_project(1)).pack(fill=BOTH, pady=2)
         Button(project_frame, text="复制项目", command=self._copy_project).pack(fill=BOTH, pady=2)
         Button(project_frame, text="粘贴项目", command=self._paste_project).pack(fill=BOTH, pady=2)
 
@@ -360,9 +362,16 @@ class BindingEditor:
         project.index_part_desc = self.project_index_desc_var.get().strip()
         display = f"{project.project_desc or '未命名'} ({project.index_part_no or '-'})"
         if 0 <= self.selected_project_index < self.project_list.size():
+            current_selection = self.project_list.curselection()
+            preserve_selection = (
+                len(current_selection) == 1
+                and current_selection[0] == self.selected_project_index
+            )
             self.project_list.delete(self.selected_project_index)
             self.project_list.insert(self.selected_project_index, display)
-            self.project_list.selection_set(self.selected_project_index)
+            if preserve_selection:
+                self.project_list.selection_clear(0, END)
+                self.project_list.selection_set(self.selected_project_index)
 
     def _refresh_group_list(self) -> None:
         self.group_list.delete(0, END)
@@ -522,6 +531,24 @@ class BindingEditor:
             new_index = min(index, len(self.projects) - 1)
             self.project_list.selection_set(new_index)
             self._on_project_select()
+
+    def _move_project(self, direction: int) -> None:
+        selection = self.project_list.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        target_index = index + direction
+        if target_index < 0 or target_index >= len(self.projects):
+            return
+        self._commit_all()
+        self.projects[index], self.projects[target_index] = (
+            self.projects[target_index],
+            self.projects[index],
+        )
+        self._refresh_project_list()
+        self.project_list.selection_clear(0, END)
+        self.project_list.selection_set(target_index)
+        self._on_project_select()
 
     def _copy_project(self) -> None:
         if self.selected_project_index is None:
