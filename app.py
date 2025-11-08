@@ -546,6 +546,9 @@ class BindingEditor:
             self.projects[index],
         )
         self._refresh_project_list()
+        self.selected_project_index = None
+        self.selected_group_index = None
+        self.selected_choice_index = None
         self.project_list.selection_clear(0, END)
         self.project_list.selection_set(target_index)
         self._on_project_select()
