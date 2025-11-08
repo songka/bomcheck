@@ -112,6 +112,28 @@ class Application:
                 f"绑定料号统计：找到 {format_quantity_text(len(result.binding_results))} 组项目，需求分组 {format_quantity_text(binding_group_count)} 组",
             ]
             for binding_result in result.binding_results:
+            result = self.processor.execute(self.selected_file, self.binding_library)
+        except SaveWorkbookError as error:
+            result = error.result
+            self._handle_save_error(error)
+        except Exception as exc:  # pragma: no cover - runtime safety
+            traceback.print_exc()
+            self._update_result_box(f"执行失败：{exc}\n{traceback.format_exc()}", success=False)
+            return
+
+        binding_group_count = sum(len(res.requirement_results) for res in result.binding_results)
+        lines = [
+            f"失效料号数量：{format_quantity_text(result.replacement_summary.total_invalid_found)}",
+            f"已标记失效料号数量：{format_quantity_text(result.replacement_summary.total_invalid_previously_marked)}",
+            f"已替换数量：{format_quantity_text(result.replacement_summary.total_replaced)}",
+            "",
+            f"绑定料号统计：找到 {format_quantity_text(len(result.binding_results))} 组项目，需求分组 {format_quantity_text(binding_group_count)} 组",
+        ]
+        for binding_result in result.binding_results:
+            lines.append(
+                f"- {binding_result.project_desc} ({binding_result.index_part_no})，主料数量：{format_quantity_text(binding_result.matched_quantity)}"
+            )
+            for group_result in binding_result.requirement_results:
                 lines.append(
                     f"- {binding_result.project_desc} ({binding_result.index_part_no})，主料数量：{format_quantity_text(binding_result.matched_quantity)}"
                 )
