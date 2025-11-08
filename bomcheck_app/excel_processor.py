@@ -120,13 +120,15 @@ class ExcelProcessor:
     def execute(self, excel_path: Path, binding_library: BindingLibrary) -> ExecutionResult:
         wb = load_workbook(excel_path)
 
-        for sheet_name in ("执行统计", "剩余物料"):
+        result_sheet_names = {"执行统计", "剩余物料", "重要物料"}
+
+        for sheet_name in result_sheet_names:
             if sheet_name in wb.sheetnames:
                 del wb[sheet_name]
 
         # 使用除结果汇总外的所有工作表参与业务处理
         data_sheets = [
-            ws for ws in wb.worksheets if ws.title not in {"执行统计", "剩余物料"}
+            ws for ws in wb.worksheets if ws.title not in result_sheet_names
         ]
 
         debug_logs: List[str] = []
@@ -165,6 +167,7 @@ class ExcelProcessor:
             binding_results,
             missing_items,
             used_part_numbers,
+            index_consumption,
             binding_debug,
         ) = self._evaluate_binding_requirements(
             part_quantities,
@@ -175,25 +178,61 @@ class ExcelProcessor:
         )
         debug_logs.extend(binding_debug)
 
+        if index_consumption:
+            for part_no, consumed_qty in index_consumption.items():
+                if consumed_qty <= 0:
+                    continue
+                remaining = max(available_inventory.get(part_no, 0.0) - consumed_qty, 0.0)
+                available_inventory[part_no] = remaining
+
         important_hits, important_part_numbers, important_debug = self._scan_important_materials(
-            part_quantities,
+            available_inventory,
             part_display,
             part_desc,
         )
         debug_logs.extend(important_debug)
 
-        remainder_keys = (set(part_quantities.keys()) - used_part_numbers) | important_part_numbers
+        important_rows = []
+        for part_no in important_part_numbers:
+            qty = available_inventory.get(part_no, 0.0)
+            if qty <= 0:
+                continue
+            important_rows.append(
+                (
+                    part_display.get(part_no, part_no),
+                    part_desc.get(part_no, ""),
+                    qty,
+                )
+            )
+
+        important_rows.sort(key=lambda item: (-item[2], item[0]))
+
+        remainder_rows = []
+        for part_no, qty in available_inventory.items():
+            if qty <= 0:
+                continue
+            if part_no in important_part_numbers:
+                continue
+            if part_no in used_part_numbers:
+                continue
+            remainder_rows.append(
+                (
+                    part_display.get(part_no, part_no),
+                    part_desc.get(part_no, ""),
+                    qty,
+                )
+            )
+
+        remainder_rows.sort(key=lambda item: (-item[2], item[0]))
 
         self._write_result_sheets(
             wb,
             replacement_summary,
             binding_results,
             important_hits,
+            important_rows,
             missing_items,
-            part_quantities,
-            part_desc,
-            part_display,
-            remainder_keys,
+            remainder_rows,
             debug_logs,
         )
 
@@ -363,7 +402,7 @@ class ExcelProcessor:
         part_display: Dict[str, str] = {}
         debug_logs: List[str] = []
 
-        skip_titles = {"执行统计", "剩余物料"}
+        skip_titles = {"执行统计", "剩余物料", "重要物料"}
 
         for ws in worksheets:  # 逐行累计第一个工作表中的库存数量与描述信息
             if ws.title in skip_titles:
@@ -457,11 +496,6 @@ class ExcelProcessor:
             integer_count = 0
             failure_count = 0
             total_count = 0
-        numeric_scores: List[Tuple[int, int, int]] = []  # (col_idx, numeric_count, decimal_count)
-        for col_idx in range(ws.max_column):
-            numeric_count = 0
-            decimal_count = 0
-            valid_column = True
             for cell in ws.iter_rows(
                 min_row=2,
                 min_col=col_idx + 1,
@@ -491,20 +525,6 @@ class ExcelProcessor:
                 return None
             # 优先选择转换后整数数量最多的列，再比较可解析数量、失败数量以及列索引确保稳定。
             scores.sort(key=lambda item: (-item[1], -item[2], item[3], item[0]))
-                parsed = self._parse_quantity_value(value)
-                if parsed is None:
-                    valid_column = False
-                    break
-                numeric_count += 1
-                if abs(parsed - round(parsed)) > 1e-6:
-                    decimal_count += 1
-            if valid_column and numeric_count:
-                numeric_scores.append((col_idx, numeric_count, decimal_count))
-
-        def _select_best(scores: List[Tuple[int, int, int]]) -> Optional[int]:
-            if not scores:
-                return None
-            scores.sort(key=lambda item: (-item[1], item[2], item[0]))
             return scores[0][0]
 
         if header_candidates:
@@ -584,10 +604,17 @@ class ExcelProcessor:
         part_desc: Dict[str, str],
         part_display: Dict[str, str],
         binding_library: BindingLibrary,
-    ) -> Tuple[List[BindingProjectResult], List[MissingItem], set[str], List[str]]:
+    ) -> Tuple[
+        List[BindingProjectResult],
+        List[MissingItem],
+        set[str],
+        Dict[str, float],
+        List[str],
+    ]:
         results: List[BindingProjectResult] = []
         missing_items: Dict[str, MissingItem] = {}
         used_parts: set[str] = set()
+        index_consumption: Dict[str, float] = defaultdict(float)
         debug_logs: List[str] = []
 
         for project in binding_library.iter_projects():
@@ -601,7 +628,8 @@ class ExcelProcessor:
                 continue
 
             consumption_qty = min(project_qty, available_index_qty)
-            available_inventory[index_key] = max(available_index_qty - consumption_qty, 0.0)
+            if consumption_qty > 0:
+                index_consumption[index_key] += consumption_qty
             used_parts.add(index_key)
 
             debug_logs.append(
@@ -644,7 +672,7 @@ class ExcelProcessor:
                 )
             )
 
-        return results, list(missing_items.values()), used_parts, debug_logs
+        return results, list(missing_items.values()), used_parts, index_consumption, debug_logs
 
     def _evaluate_group(
         self,
@@ -769,7 +797,7 @@ class ExcelProcessor:
 
     def _scan_important_materials(
         self,
-        part_quantities: Dict[str, float],
+        available_inventory: Dict[str, float],
         part_display: Dict[str, str],
         part_descriptions: Dict[str, str],
     ) -> Tuple[List[ImportantMaterialHit], set[str], List[str]]:
@@ -797,7 +825,9 @@ class ExcelProcessor:
             total_qty = 0.0
             matched_detail: Dict[str, float] = {}
 
-            for part_no, qty in part_quantities.items():
+            for part_no, qty in available_inventory.items():
+                if qty <= 0:
+                    continue
                 variants = part_variant_cache.get(part_no)
                 if variants is None:
                     variants = self._collect_part_variants(
@@ -838,17 +868,17 @@ class ExcelProcessor:
         replacement_summary: ReplacementSummary,
         binding_results: List[BindingProjectResult],
         important_hits: List[ImportantMaterialHit],
+        important_part_rows: List[Tuple[str, str, float]],
         missing_items: List[MissingItem],
-        part_quantities: Dict[str, float],
-        part_descriptions: Dict[str, str],
-        part_display: Dict[str, str],
-        remainder_keys: set[str],
+        remainder_rows: List[Tuple[str, str, float]],
         debug_logs: List[str],
     ) -> None:
         if "执行统计" in wb.sheetnames:
             del wb["执行统计"]
         if "剩余物料" in wb.sheetnames:
             del wb["剩余物料"]
+        if "重要物料" in wb.sheetnames:
+            del wb["重要物料"]
 
         summary_ws = wb.create_sheet("执行统计")
         summary_ws.append(["失效料号数量", replacement_summary.total_invalid_found])
@@ -936,20 +966,27 @@ class ExcelProcessor:
             )
 
         summary_ws.append([])
+        summary_ws.append(["重要物料余量"])
+        summary_ws.append(["料号", "描述", "剩余数量"])
+        for part_no, desc, qty in important_part_rows:
+            summary_ws.append(
+                [part_no, desc, format_quantity_cell(qty)]
+            )
+
+        summary_ws.append([])
         summary_ws.append(["调试信息"])
         for line in debug_logs:
             summary_ws.append([line])
 
+        important_ws = wb.create_sheet("重要物料")
+        important_ws.append(["料号", "描述", "剩余数量"])
+        for part_no, desc, qty in important_part_rows:
+            important_ws.append([part_no, desc, format_quantity_cell(qty)])
+
         remainder_ws = wb.create_sheet("剩余物料")
-        remainder_ws.append(["料号", "描述", "数量"])
-        for key in sorted(remainder_keys, key=lambda k: part_display.get(k, k)):
-            remainder_ws.append(
-                [
-                    part_display.get(key, key),
-                    part_descriptions.get(key, ""),
-                    format_quantity_cell(part_quantities.get(key, 0.0)),
-                ]
-            )
+        remainder_ws.append(["料号", "描述", "剩余数量"])
+        for part_no, desc, qty in remainder_rows:
+            remainder_ws.append([part_no, desc, format_quantity_cell(qty)])
 
     def _collect_part_variants(self, display_no: str, part_no: str, description: str) -> set[str]:
         variants: set[str] = set()
