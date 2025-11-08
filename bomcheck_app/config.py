@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from json import JSONDecodeError
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,9 +46,7 @@ def load_config(path: Path) -> AppConfig:
     try:
         data = json.loads(raw_text)
     except JSONDecodeError as error:
-        sanitized_text = _escape_invalid_backslashes(raw_text)
-        if sanitized_text == raw_text:
-            raise
+        sanitized_text = raw_text.replace("\\", "\\\\")
         try:
             data = json.loads(sanitized_text)
         except JSONDecodeError as secondary_error:
