@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+from json import JSONDecodeError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
@@ -39,13 +41,35 @@ def load_config(path: Path) -> AppConfig:
     base_dir = path.parent
     if not path.exists():
         save_config(path, AppConfig.from_dict(DEFAULT_CONFIG, base_dir))
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return AppConfig.from_dict(data, base_dir)
+
+    raw_text = path.read_text(encoding="utf-8")
+    corrected = False
+    try:
+        data = json.loads(raw_text)
+    except JSONDecodeError as error:
+        sanitized_text = _escape_invalid_backslashes(raw_text)
+        if sanitized_text == raw_text:
+            raise
+        try:
+            data = json.loads(sanitized_text)
+        except JSONDecodeError as secondary_error:
+            raise error from secondary_error
+        corrected = True
+
+    config = AppConfig.from_dict(data, base_dir)
+    if corrected:
+        save_config(path, config)
+    return config
 
 
 def save_config(path: Path, config: AppConfig) -> None:
     base_dir = path.parent
     path.write_text(json.dumps(config.to_dict(base_dir), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _escape_invalid_backslashes(raw_text: str) -> str:
+    pattern = r"(?<!\\)\\(?![\\/\"bfnrtu])"
+    return re.sub(pattern, r"\\\\", raw_text)
 
 
 def _resolve_path(value: str | None, base_dir: Path) -> Path:

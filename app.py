@@ -129,43 +129,6 @@ class Application:
         decision_event = threading.Event()
         default_extension = error.path.suffix or ".xlsx"
 
-            binding_group_count = sum(len(res.requirement_results) for res in result.binding_results)
-            lines = [
-                f"失效料号数量：{format_quantity_text(result.replacement_summary.total_invalid_found)}",
-                f"已标记失效料号数量：{format_quantity_text(result.replacement_summary.total_invalid_previously_marked)}",
-                f"已替换数量：{format_quantity_text(result.replacement_summary.total_replaced)}",
-                "",
-                f"绑定料号统计：找到 {format_quantity_text(len(result.binding_results))} 组项目，需求分组 {format_quantity_text(binding_group_count)} 组",
-            ]
-            for binding_result in result.binding_results:
-            result = self.processor.execute(self.selected_file, self.binding_library)
-        except SaveWorkbookError as error:
-            result = error.result
-            self._handle_save_error(error)
-        except Exception as exc:  # pragma: no cover - runtime safety
-            traceback.print_exc()
-            self._update_result_box(f"执行失败：{exc}\n{traceback.format_exc()}", success=False)
-            return
-
-    def _on_execution_complete(self) -> None:
-        if hasattr(self, "execute_button"):
-            self.execute_button.config(state="normal")
-        if self._execution_lock.locked():
-            self._execution_lock.release()
-        self._execution_thread = None
-
-    def _update_result_box(self, message: str, success: bool) -> None:
-        def update():
-            self.result_text.delete(1.0, END)
-            self.result_text.insert(END, message)
-            self.result_text.configure(bg="#d4edda" if success else "#f8d7da")
-
-        self.root.after(0, update)
-
-    def _handle_save_error(self, error: SaveWorkbookError) -> None:
-        decision_event = threading.Event()
-        default_extension = error.path.suffix or ".xlsx"
-
         def prompt() -> None:
             message = (
                 f"无法写入文件：{error.path}\n"
@@ -211,7 +174,6 @@ class Application:
         binding_group_count = sum(
             len(res.requirement_results) for res in result.binding_results
         )
-        binding_group_count = sum(len(res.requirement_results) for res in result.binding_results)
         lines = [
             "",
             (
@@ -290,157 +252,11 @@ class Application:
         if not result.debug_logs:
             return []
 
-                lines.append(
-                    f"- {binding_result.project_desc} ({binding_result.index_part_no})，主料数量：{format_quantity_text(binding_result.matched_quantity)}"
-                )
-                for group_result in binding_result.requirement_results:
-                    lines.append(
-                        "  · "
-                        + f"{group_result.group_name}：需求 {format_quantity_text(group_result.required_qty)}，"
-                        + f"可用 {format_quantity_text(group_result.available_qty)}，缺少 {format_quantity_text(group_result.missing_qty)}"
-                    )
-                    lines.append(f"    满足料号：{matched_text}")
-                if group_result.missing_choices:
-                    lines.append(f"    缺少料号：{', '.join(group_result.missing_choices)}")
-        return lines
-
-    def _summarize_missing_items(self, result: ExecutionResult) -> list[str]:
-        if not result.missing_items:
-            return []
-
-        lines = ["", "缺失物料："]
-        for item in result.missing_items:
-            lines.append(
-                f"- {item.part_no} {item.desc} 缺少 {format_quantity_text(item.missing_qty)}"
-            )
-        return lines
-
-    def _summarize_important_hits(self, result: ExecutionResult) -> list[str]:
-        lines = [
-            "",
-            f"重要物料统计：找到 {format_quantity_text(len(result.important_hits))} 组",
-        ]
-        if not result.important_hits:
-            lines.append("（无重要物料命中）")
-            return lines
-
-        for hit in result.important_hits:
-            lines.append(
-                f"- {hit.keyword}（{hit.converted_keyword}）：{format_quantity_text(hit.total_quantity)}"
-            )
-            if hit.matched_parts:
-                matched_text = ", ".join(
-                    f"{part}:{format_quantity_text(qty)}"
-                    for part, qty in hit.matched_parts.items()
-                )
-                lines.append(f"    命中料号：{matched_text}")
-        return lines
-
-    def _summarize_debug_logs(self, result: ExecutionResult) -> list[str]:
-        if not result.debug_logs:
-            return []
-                    if group_result.matched_details:
-                        matched_text = ", ".join(
-                            f"{part}:{format_quantity_text(qty)}"
-                            for part, qty in group_result.matched_details.items()
-                        )
-                        lines.append(f"    满足料号：{matched_text}")
-                    if group_result.missing_choices:
-                        lines.append(f"    缺少料号：{', '.join(group_result.missing_choices)}")
-            if not result.binding_results:
-                lines.append("（未找到匹配的绑定项目）")
-            if result.missing_items:
-                lines.append("")
-                lines.append("缺失物料：")
-                for item in result.missing_items:
-                    lines.append(
-                        f"- {item.part_no} {item.desc} 缺少 {format_quantity_text(item.missing_qty)}"
-                    )
-            lines.append("")
-            lines.append(
-                f"重要物料统计：找到 {format_quantity_text(len(result.important_hits))} 组"
-            )
-            if result.important_hits:
-                for hit in result.important_hits:
-                    lines.append(
-                        f"- {hit.keyword}（{hit.converted_keyword}）：{format_quantity_text(hit.total_quantity)}"
-                    )
-                    if hit.matched_parts:
-                        matched_text = ", ".join(
-                            f"{part}:{format_quantity_text(qty)}"
-                            for part, qty in hit.matched_parts.items()
-                        )
-                        lines.append(f"    命中料号：{matched_text}")
-            else:
-                lines.append("（无重要物料命中）")
-            if result.debug_logs:
-                lines.append("")
-                lines.append("调试信息：")
-                for log in result.debug_logs:
-                    lines.append(f"- {log}")
-            success = not result.has_missing
-            self._update_result_box("\n".join(lines), success=success)
-        finally:
-            self.root.after(0, self._on_execution_complete)
-
-    def _on_execution_complete(self) -> None:
-        if hasattr(self, "execute_button"):
-            self.execute_button.config(state="normal")
-        if self._execution_lock.locked():
-            self._execution_lock.release()
-        self._execution_thread = None
-
-        for hit in result.important_hits:
-            lines.append(
-                f"- {hit.keyword}（{hit.converted_keyword}）：{format_quantity_text(hit.total_quantity)}"
-            )
-            if hit.matched_parts:
-                matched_text = ", ".join(
-                    f"{part}:{format_quantity_text(qty)}"
-                    for part, qty in hit.matched_parts.items()
-                )
-                lines.append(f"    命中料号：{matched_text}")
-        return lines
-
-    def _summarize_debug_logs(self, result: ExecutionResult) -> list[str]:
-        if not result.debug_logs:
-            return []
-
         return ["", "调试信息：", *[f"- {log}" for log in result.debug_logs]]
-    def _handle_save_error(self, error: SaveWorkbookError) -> None:
-        decision_event = threading.Event()
-        default_extension = error.path.suffix or ".xlsx"
-
-        def prompt() -> None:
-            message = (
-                f"无法写入文件：{error.path}\n"
-                "该文件可能已在其他程序中打开。是否将结果另存为其他文件？"
-            )
-            save_elsewhere = messagebox.askyesno("文件被占用", message)
-            if save_elsewhere:
-                new_path = filedialog.asksaveasfilename(
-                    title="另存结果",
-                    defaultextension=default_extension,
-                    filetypes=[("Excel", "*.xlsx"), ("Excel", "*.xlsm")],
-                    initialfile=error.path.name,
-                )
-                if new_path:
-                    try:
-                        error.workbook.save(new_path)
-                        messagebox.showinfo("保存成功", f"结果已保存到：{new_path}")
-                    except PermissionError:
-                        messagebox.showerror("保存失败", "目标文件正在使用中，未能保存结果。")
-                    except Exception as exc:  # pragma: no cover - user feedback
-                        messagebox.showerror("保存失败", f"另存失败：{exc}")
-            decision_event.set()
-
-        self.root.after(0, prompt)
-        decision_event.wait()
-
-        return ["", "调试信息：", *[f"- {log}" for log in result.debug_logs]]
-
 
 class BindingEditor:
+    CONDITION_MODE_OPTIONS = ("", "ALL", "ANY", "NOTANY")
+
     def __init__(self, master, binding_library: BindingLibrary):
         self.binding_library = binding_library
         self.top = Toplevel(master)
@@ -555,7 +371,16 @@ class BindingEditor:
         Entry(choice_edit, textvariable=self.choice_desc_var).grid(row=1, column=1, sticky="ew")
         Label(choice_edit, text="条件模式：").grid(row=2, column=0, sticky="w")
         self.choice_mode_var = StringVar()
-        Entry(choice_edit, textvariable=self.choice_mode_var).grid(row=2, column=1, sticky="ew")
+        self.choice_mode_combo = ttk.Combobox(
+            choice_edit,
+            textvariable=self.choice_mode_var,
+            values=self.CONDITION_MODE_OPTIONS,
+            state="readonly",
+        )
+        self.choice_mode_combo.grid(row=2, column=1, sticky="ew")
+        self.choice_mode_combo.bind(
+            "<<ComboboxSelected>>", lambda _event: self._commit_choice_fields()
+        )
         Label(choice_edit, text="条件料号：").grid(row=3, column=0, sticky="w")
         self.choice_condition_var = StringVar()
         Entry(choice_edit, textvariable=self.choice_condition_var).grid(row=3, column=1, sticky="ew")
@@ -729,7 +554,8 @@ class BindingEditor:
         self.choice_tree.focus("")
         self.choice_part_var.set("")
         self.choice_desc_var.set("")
-        self.choice_mode_var.set("")
+        self.choice_mode_combo.configure(values=self.CONDITION_MODE_OPTIONS)
+        self._set_choice_mode_value("")
         self.choice_condition_var.set("")
         self.choice_number_var.set("")
         self.selected_choice_index = None
@@ -748,9 +574,19 @@ class BindingEditor:
         ]
         self.choice_part_var.set(choice.part_no)
         self.choice_desc_var.set(choice.desc)
-        self.choice_mode_var.set(choice.condition_mode or "")
+        self._set_choice_mode_value(choice.condition_mode or "")
         self.choice_condition_var.set(",".join(choice.condition_part_nos))
         self.choice_number_var.set("" if choice.number is None else str(choice.number))
+
+    def _set_choice_mode_value(self, value: str) -> None:
+        if not hasattr(self, "choice_mode_combo"):
+            self.choice_mode_var.set(value)
+            return
+        current_values = list(self.choice_mode_combo.cget("values"))
+        if value not in current_values:
+            current_values.append(value)
+            self.choice_mode_combo.configure(values=current_values)
+        self.choice_mode_var.set(value)
 
     def _commit_choice_fields(self) -> None:
         if (
