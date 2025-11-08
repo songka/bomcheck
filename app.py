@@ -43,27 +43,17 @@ class Application:
         self._execution_lock = threading.Lock()
         self._execution_thread: threading.Thread | None = None
         self._build_ui()
-        self._refresh_config_display()
+        self._refresh_config_entry()
 
     def _build_ui(self) -> None:
         config_frame = Frame(self.root)
         config_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
 
         Label(config_frame, text="配置文件：").pack(side=LEFT)
-        self.config_path_var = StringVar()
-        self.config_entry = Entry(
-            config_frame,
-            width=50,
-            textvariable=self.config_path_var,
-            state="readonly",
-        )
+        self.config_entry = Entry(config_frame, width=50)
         self.config_entry.pack(side=LEFT, padx=5)
-        Button(config_frame, text="设置数据库路径", command=self._open_database_dialog).pack(
-            side=LEFT
-        )
-        Button(config_frame, text="重新加载", command=self._reload_config).pack(
-            side=LEFT, padx=5
-        )
+        Button(config_frame, text="浏览", command=self._choose_config).pack(side=LEFT)
+        Button(config_frame, text="重新加载", command=self._reload_config).pack(side=LEFT, padx=5)
 
         file_frame = Frame(self.root)
         file_frame.pack(fill=BOTH, padx=10, pady=10)
@@ -104,20 +94,26 @@ class Application:
         self.config = config
         self.binding_library = binding_library
         self.processor = processor
-        self._refresh_config_display()
+        self._refresh_config_entry()
 
-    def _refresh_config_display(self) -> None:
-        if hasattr(self, "config_path_var"):
-            self.config_entry.config(state="normal")
-            self.config_path_var.set(str(self.config_path))
-            self.config_entry.config(state="readonly")
+    def _refresh_config_entry(self) -> None:
+        if hasattr(self, "config_entry"):
+            self.config_entry.delete(0, END)
+            self.config_entry.insert(0, str(self.config_path))
 
-    def _open_database_dialog(self) -> None:
-        DatabaseConfigDialog(
-            self.root,
-            self.config,
-            on_save=self._update_database_paths,
+    def _choose_config(self) -> None:
+        file_path = filedialog.askopenfilename(
+            filetypes=[("JSON", "*.json"), ("所有文件", "*.*")]
         )
+        if not file_path:
+            return
+
+        try:
+            self._apply_config(Path(file_path))
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("加载失败", f"读取配置文件失败：{exc}")
+        else:
+            messagebox.showinfo("配置已更新", f"当前配置文件：{file_path}")
 
     def _reload_config(self) -> None:
         try:
@@ -126,26 +122,6 @@ class Application:
             messagebox.showerror("加载失败", f"重新加载配置失败：{exc}")
         else:
             messagebox.showinfo("配置已更新", f"已重新加载：{self.config_path}")
-
-    def _update_database_paths(self, invalid_path: Path, binding_path: Path) -> bool:
-        previous_config = self.config
-        new_config = AppConfig(
-            invalid_part_db=invalid_path,
-            binding_library=binding_path,
-            important_materials=previous_config.important_materials,
-        )
-
-        save_config(self.config_path, new_config)
-        try:
-            self._apply_config(self.config_path)
-        except Exception as exc:  # pragma: no cover - user feedback
-            save_config(self.config_path, previous_config)
-            self._apply_config(self.config_path)
-            messagebox.showerror("保存失败", f"更新数据库路径失败：{exc}")
-            return False
-
-        messagebox.showinfo("配置已更新", "数据库路径已保存。")
-        return True
 
     def _choose_file(self) -> None:
         file_path = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx"), ("Excel", "*.xlsm")])
@@ -904,78 +880,6 @@ class BindingEditor:
             messagebox.showerror("错误", f"保存失败：{exc}")
             return
         messagebox.showinfo("完成", "保存成功")
-
-
-class DatabaseConfigDialog:
-    def __init__(
-        self,
-        master,
-        config: AppConfig,
-        on_save: Callable[[Path, Path], bool],
-    ) -> None:
-        self.on_save = on_save
-        self.config = config
-        self.top = Toplevel(master)
-        self.top.title("数据库路径设置")
-        self.invalid_var = StringVar(value=str(config.invalid_part_db))
-        self.binding_var = StringVar(value=str(config.binding_library))
-        self._build_ui()
-
-    def _build_ui(self) -> None:
-        frame = Frame(self.top)
-        frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
-
-        invalid_frame = Frame(frame)
-        invalid_frame.pack(fill=BOTH, pady=5)
-        Label(invalid_frame, text="失效料号数据库：").pack(side=LEFT)
-        Entry(invalid_frame, width=45, textvariable=self.invalid_var).pack(side=LEFT, padx=5)
-        Button(
-            invalid_frame,
-            text="浏览",
-            command=self._choose_invalid,
-        ).pack(side=LEFT)
-
-        binding_frame = Frame(frame)
-        binding_frame.pack(fill=BOTH, pady=5)
-        Label(binding_frame, text="绑定料号数据库：").pack(side=LEFT)
-        Entry(binding_frame, width=45, textvariable=self.binding_var).pack(side=LEFT, padx=5)
-        Button(
-            binding_frame,
-            text="浏览",
-            command=self._choose_binding,
-        ).pack(side=LEFT)
-
-        button_frame = Frame(frame)
-        button_frame.pack(fill=BOTH, pady=(10, 0))
-        Button(button_frame, text="保存", command=self._save).pack(side=LEFT)
-        Button(button_frame, text="取消", command=self.top.destroy).pack(side=RIGHT)
-
-    def _choose_invalid(self) -> None:
-        file_path = filedialog.askopenfilename(
-            title="选择失效料号数据库",
-            filetypes=[("Excel", "*.xlsx *.xlsm"), ("所有文件", "*.*")],
-        )
-        if file_path:
-            self.invalid_var.set(file_path)
-
-    def _choose_binding(self) -> None:
-        file_path = filedialog.askopenfilename(
-            title="选择绑定料号数据库",
-            filetypes=[("脚本", "*.js *.json"), ("所有文件", "*.*")],
-        )
-        if file_path:
-            self.binding_var.set(file_path)
-
-    def _save(self) -> None:
-        invalid_value = self.invalid_var.get().strip()
-        binding_value = self.binding_var.get().strip()
-        if not invalid_value or not binding_value:
-            messagebox.showerror("错误", "请填写所有数据库路径")
-            return
-
-        success = self.on_save(Path(invalid_value), Path(binding_value))
-        if success:
-            self.top.destroy()
 
 
 class ImportantMaterialEditor:
