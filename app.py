@@ -36,16 +36,24 @@ class Application:
     def __init__(self, root: Tk):
         self.root = root
         self.root.title("料号检测系统")
-        self.config = load_config(CONFIG_PATH)
-        self.binding_library = BindingLibrary(self.config.binding_library)
-        self.binding_library.load()
-        self.processor = ExcelProcessor(self.config)
+        self.config_path: Path = CONFIG_PATH
+        self._apply_config(self.config_path)
         self.selected_file: Path | None = None
         self._execution_lock = threading.Lock()
         self._execution_thread: threading.Thread | None = None
         self._build_ui()
+        self._refresh_config_entry()
 
     def _build_ui(self) -> None:
+        config_frame = Frame(self.root)
+        config_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
+
+        Label(config_frame, text="配置文件：").pack(side=LEFT)
+        self.config_entry = Entry(config_frame, width=50)
+        self.config_entry.pack(side=LEFT, padx=5)
+        Button(config_frame, text="浏览", command=self._choose_config).pack(side=LEFT)
+        Button(config_frame, text="重新加载", command=self._reload_config).pack(side=LEFT, padx=5)
+
         file_frame = Frame(self.root)
         file_frame.pack(fill=BOTH, padx=10, pady=10)
 
@@ -59,6 +67,9 @@ class Application:
         self.execute_button = Button(action_frame, text="执行", command=self._execute)
         self.execute_button.pack(side=LEFT)
         Button(action_frame, text="编辑绑定料号", command=self._open_binding_editor).pack(side=LEFT, padx=5)
+        Button(action_frame, text="编辑重要物料", command=self._open_important_material_editor).pack(
+            side=LEFT, padx=5
+        )
 
         result_frame = Frame(self.root)
         result_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
@@ -72,6 +83,44 @@ class Application:
         self.result_text.pack(side=LEFT, fill=BOTH, expand=True)
         self.result_text.config(yscrollcommand=scrollbar.set)
         scrollbar.config(command=self.result_text.yview)
+
+    def _apply_config(self, path: Path) -> None:
+        config = load_config(path)
+        binding_library = BindingLibrary(config.binding_library)
+        binding_library.load()
+        processor = ExcelProcessor(config)
+        self.config_path = path
+        self.config = config
+        self.binding_library = binding_library
+        self.processor = processor
+        self._refresh_config_entry()
+
+    def _refresh_config_entry(self) -> None:
+        if hasattr(self, "config_entry"):
+            self.config_entry.delete(0, END)
+            self.config_entry.insert(0, str(self.config_path))
+
+    def _choose_config(self) -> None:
+        file_path = filedialog.askopenfilename(
+            filetypes=[("JSON", "*.json"), ("所有文件", "*.*")]
+        )
+        if not file_path:
+            return
+
+        try:
+            self._apply_config(Path(file_path))
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("加载失败", f"读取配置文件失败：{exc}")
+        else:
+            messagebox.showinfo("配置已更新", f"当前配置文件：{file_path}")
+
+    def _reload_config(self) -> None:
+        try:
+            self._apply_config(self.config_path)
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("加载失败", f"重新加载配置失败：{exc}")
+        else:
+            messagebox.showinfo("配置已更新", f"已重新加载：{self.config_path}")
 
     def _choose_file(self) -> None:
         file_path = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx"), ("Excel", "*.xlsm")])
@@ -157,6 +206,9 @@ class Application:
 
     def _open_binding_editor(self) -> None:
         BindingEditor(self.root, self.binding_library)
+
+    def _open_important_material_editor(self) -> None:
+        ImportantMaterialEditor(self.root, self.config.important_materials)
 
     def _build_summary_lines(self, result: ExecutionResult) -> list[str]:
         lines = [
@@ -827,6 +879,60 @@ class BindingEditor:
             messagebox.showerror("错误", f"保存失败：{exc}")
             return
         messagebox.showinfo("完成", "保存成功")
+
+
+class ImportantMaterialEditor:
+    def __init__(self, master, path: Path):
+        self.path = path
+        self.top = Toplevel(master)
+        self.top.title("重要物料编辑")
+        self._build_ui()
+        self._load_content()
+
+    def _build_ui(self) -> None:
+        path_frame = Frame(self.top)
+        path_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
+        Label(path_frame, text="文件路径：").pack(side=LEFT)
+        self.path_label = Label(path_frame, text=str(self.path), anchor="w")
+        self.path_label.pack(side=LEFT, fill=BOTH, expand=True)
+
+        text_frame = Frame(self.top)
+        text_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        scrollbar = Scrollbar(text_frame)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        self.text = Text(text_frame, wrap="none")
+        self.text.pack(side=LEFT, fill=BOTH, expand=True)
+        self.text.config(yscrollcommand=scrollbar.set)
+        scrollbar.config(command=self.text.yview)
+
+        button_frame = Frame(self.top)
+        button_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
+        Button(button_frame, text="保存", command=self._save_content).pack(side=LEFT)
+        Button(button_frame, text="重新加载", command=self._load_content).pack(side=LEFT, padx=5)
+        Button(button_frame, text="关闭", command=self.top.destroy).pack(side=RIGHT)
+
+    def _load_content(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if not self.path.exists():
+                self.path.touch()
+            content = self.path.read_text(encoding="utf-8")
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("加载失败", f"读取重要物料失败：{exc}")
+            content = ""
+        self.text.delete(1.0, END)
+        self.text.insert(END, content)
+
+    def _save_content(self) -> None:
+        content = self.text.get("1.0", END)
+        if content.endswith("\n"):
+            content = content[:-1]
+        try:
+            self.path.write_text(content, encoding="utf-8")
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("保存失败", f"写入重要物料失败：{exc}")
+        else:
+            messagebox.showinfo("保存成功", f"重要物料已保存到：{self.path}")
 
 
 def main() -> None:
