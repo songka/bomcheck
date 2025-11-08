@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import traceback
 from pathlib import Path
+from typing import Callable
 from tkinter import (
     BOTH,
     END,
@@ -25,7 +26,7 @@ from tkinter import (
 from tkinter import ttk
 
 from bomcheck_app.binding_library import BindingChoice, BindingGroup, BindingLibrary, BindingProject
-from bomcheck_app.config import load_config
+from bomcheck_app.config import AppConfig, load_config, save_config
 from bomcheck_app.excel_processor import ExcelProcessor, SaveWorkbookError, format_quantity_text
 from bomcheck_app.models import ExecutionResult
 
