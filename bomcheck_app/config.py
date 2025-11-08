@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from json import JSONDecodeError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
@@ -39,8 +40,23 @@ def load_config(path: Path) -> AppConfig:
     base_dir = path.parent
     if not path.exists():
         save_config(path, AppConfig.from_dict(DEFAULT_CONFIG, base_dir))
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return AppConfig.from_dict(data, base_dir)
+
+    raw_text = path.read_text(encoding="utf-8")
+    corrected = False
+    try:
+        data = json.loads(raw_text)
+    except JSONDecodeError as error:
+        sanitized_text = raw_text.replace("\\", "\\\\")
+        try:
+            data = json.loads(sanitized_text)
+        except JSONDecodeError as secondary_error:
+            raise error from secondary_error
+        corrected = True
+
+    config = AppConfig.from_dict(data, base_dir)
+    if corrected:
+        save_config(path, config)
+    return config
 
 
 def save_config(path: Path, config: AppConfig) -> None:
