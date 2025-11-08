@@ -7,7 +7,7 @@ from math import isclose
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import Cell
 from openpyxl.styles import PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
@@ -23,6 +23,16 @@ from .models import (
     RequirementGroupResult,
 )
 from .text_utils import normalize_text, normalized_variants
+
+
+class SaveWorkbookError(Exception):
+    """Raised when the workbook cannot be saved to the requested path."""
+
+    def __init__(self, path: Path, workbook: Workbook, result: "ExecutionResult") -> None:
+        super().__init__(f"无法写入文件：{path}")
+        self.path = path
+        self.workbook = workbook
+        self.result = result
 
 
 def normalize_part_no(value: str) -> str:
@@ -236,15 +246,20 @@ class ExcelProcessor:
             debug_logs,
         )
 
-        wb.save(excel_path)
-
-        return ExecutionResult(
+        execution_result = ExecutionResult(
             replacement_summary=replacement_summary,
             binding_results=binding_results,
             important_hits=important_hits,
             missing_items=missing_items,
             debug_logs=debug_logs,
         )
+
+        try:
+            wb.save(excel_path)
+        except PermissionError as exc:
+            raise SaveWorkbookError(excel_path, wb, execution_result) from exc
+
+        return execution_result
 
     def _apply_replacements(self, worksheets: List[Worksheet]) -> Tuple[ReplacementSummary, List[str]]:
         summary = ReplacementSummary()

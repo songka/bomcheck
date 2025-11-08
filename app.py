@@ -26,7 +26,7 @@ from tkinter import ttk
 
 from bomcheck_app.binding_library import BindingChoice, BindingGroup, BindingLibrary, BindingProject
 from bomcheck_app.config import load_config
-from bomcheck_app.excel_processor import ExcelProcessor, format_quantity_text
+from bomcheck_app.excel_processor import ExcelProcessor, SaveWorkbookError, format_quantity_text
 
 CONFIG_PATH = Path("config.json")
 
@@ -86,6 +86,9 @@ class Application:
     def _run_execution(self) -> None:
         try:
             result = self.processor.execute(self.selected_file, self.binding_library)
+        except SaveWorkbookError as error:
+            result = error.result
+            self._handle_save_error(error)
         except Exception as exc:  # pragma: no cover - runtime safety
             traceback.print_exc()
             self._update_result_box(f"执行失败：{exc}\n{traceback.format_exc()}", success=False)
@@ -158,6 +161,36 @@ class Application:
             self.result_text.configure(bg="#d4edda" if success else "#f8d7da")
 
         self.root.after(0, update)
+
+    def _handle_save_error(self, error: SaveWorkbookError) -> None:
+        decision_event = threading.Event()
+        default_extension = error.path.suffix or ".xlsx"
+
+        def prompt() -> None:
+            message = (
+                f"无法写入文件：{error.path}\n"
+                "该文件可能已在其他程序中打开。是否将结果另存为其他文件？"
+            )
+            save_elsewhere = messagebox.askyesno("文件被占用", message)
+            if save_elsewhere:
+                new_path = filedialog.asksaveasfilename(
+                    title="另存结果",
+                    defaultextension=default_extension,
+                    filetypes=[("Excel", "*.xlsx"), ("Excel", "*.xlsm")],
+                    initialfile=error.path.name,
+                )
+                if new_path:
+                    try:
+                        error.workbook.save(new_path)
+                        messagebox.showinfo("保存成功", f"结果已保存到：{new_path}")
+                    except PermissionError:
+                        messagebox.showerror("保存失败", "目标文件正在使用中，未能保存结果。")
+                    except Exception as exc:  # pragma: no cover - user feedback
+                        messagebox.showerror("保存失败", f"另存失败：{exc}")
+            decision_event.set()
+
+        self.root.after(0, prompt)
+        decision_event.wait()
 
     def _open_binding_editor(self) -> None:
         BindingEditor(self.root, self.binding_library)
