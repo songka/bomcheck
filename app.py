@@ -172,6 +172,8 @@ class BindingEditor:
         self.selected_project_index: int | None = None
         self.selected_group_index: int | None = None
         self.selected_choice_index: int | None = None
+        self.project_clipboard: BindingProject | None = None
+        self.group_clipboard: BindingGroup | None = None
         self._build_ui()
         self._load_data()
 
@@ -195,6 +197,10 @@ class BindingEditor:
         self.project_list.bind("<<ListboxSelect>>", lambda _event: self._on_project_select())
         Button(project_frame, text="新增项目", command=self._add_project).pack(fill=BOTH, pady=2)
         Button(project_frame, text="删除项目", command=self._remove_project).pack(fill=BOTH, pady=2)
+        Button(project_frame, text="上移", command=lambda: self._move_project(-1)).pack(fill=BOTH, pady=2)
+        Button(project_frame, text="下移", command=lambda: self._move_project(1)).pack(fill=BOTH, pady=2)
+        Button(project_frame, text="复制项目", command=self._copy_project).pack(fill=BOTH, pady=2)
+        Button(project_frame, text="粘贴项目", command=self._paste_project).pack(fill=BOTH, pady=2)
 
         # Detail panel
         detail_frame = Frame(main_frame)
@@ -231,6 +237,8 @@ class BindingEditor:
         self.group_list.bind("<<ListboxSelect>>", lambda _event: self._on_group_select())
         Button(group_left, text="新增分组", command=self._add_group).pack(fill=BOTH, pady=2)
         Button(group_left, text="删除分组", command=self._remove_group).pack(fill=BOTH, pady=2)
+        Button(group_left, text="复制分组", command=self._copy_group).pack(fill=BOTH, pady=2)
+        Button(group_left, text="粘贴分组", command=self._paste_group).pack(fill=BOTH, pady=2)
 
         group_detail = Frame(group_frame)
         group_detail.pack(side=LEFT, fill=BOTH, expand=True, padx=10)
@@ -354,9 +362,16 @@ class BindingEditor:
         project.index_part_desc = self.project_index_desc_var.get().strip()
         display = f"{project.project_desc or '未命名'} ({project.index_part_no or '-'})"
         if 0 <= self.selected_project_index < self.project_list.size():
+            current_selection = self.project_list.curselection()
+            preserve_selection = (
+                len(current_selection) == 1
+                and current_selection[0] == self.selected_project_index
+            )
             self.project_list.delete(self.selected_project_index)
             self.project_list.insert(self.selected_project_index, display)
-            self.project_list.selection_set(self.selected_project_index)
+            if preserve_selection:
+                self.project_list.selection_clear(0, END)
+                self.project_list.selection_set(self.selected_project_index)
 
     def _refresh_group_list(self) -> None:
         self.group_list.delete(0, END)
@@ -400,10 +415,13 @@ class BindingEditor:
         except ValueError:
             group.number = 1.0
         display = f"{group.group_name or '未命名'} (需求:{group.number})"
+        current_selection = self.group_list.curselection()
+        preserve_selection = self.selected_group_index in current_selection
         if 0 <= self.selected_group_index < self.group_list.size():
             self.group_list.delete(self.selected_group_index)
             self.group_list.insert(self.selected_group_index, display)
-            self.group_list.selection_set(self.selected_group_index)
+            if preserve_selection:
+                self.group_list.selection_set(self.selected_group_index)
 
     def _refresh_choice_list(self, auto_select_first: bool = False) -> None:
         self.choice_tree.selection_remove(self.choice_tree.selection())
@@ -514,6 +532,45 @@ class BindingEditor:
             self.project_list.selection_set(new_index)
             self._on_project_select()
 
+    def _move_project(self, direction: int) -> None:
+        selection = self.project_list.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        target_index = index + direction
+        if target_index < 0 or target_index >= len(self.projects):
+            return
+        self._commit_all()
+        self.projects[index], self.projects[target_index] = (
+            self.projects[target_index],
+            self.projects[index],
+        )
+        self._refresh_project_list()
+        self.project_list.selection_clear(0, END)
+        self.project_list.selection_set(target_index)
+        self._on_project_select()
+
+    def _copy_project(self) -> None:
+        if self.selected_project_index is None:
+            messagebox.showwarning("提示", "请先选择项目")
+            return
+        self._commit_all()
+        project = self.projects[self.selected_project_index]
+        self.project_clipboard = BindingProject.from_dict(project.to_dict())
+
+    def _paste_project(self) -> None:
+        if self.project_clipboard is None:
+            messagebox.showwarning("提示", "请先复制项目")
+            return
+        self._commit_all()
+        new_project = BindingProject.from_dict(self.project_clipboard.to_dict())
+        self.projects.append(new_project)
+        self._refresh_project_list()
+        new_index = len(self.projects) - 1
+        self.project_list.selection_clear(0, END)
+        self.project_list.selection_set(new_index)
+        self.project_list.event_generate("<<ListboxSelect>>")
+
     def _add_group(self) -> None:
         if self.selected_project_index is None:
             messagebox.showwarning("提示", "请先选择项目")
@@ -542,6 +599,33 @@ class BindingEditor:
             new_index = min(index, len(groups) - 1)
             self.group_list.selection_set(new_index)
             self._on_group_select()
+
+    def _copy_group(self) -> None:
+        if self.selected_project_index is None or self.selected_group_index is None:
+            messagebox.showwarning("提示", "请先选择分组")
+            return
+        self._commit_choice_fields()
+        self._commit_group_fields()
+        group = self.projects[self.selected_project_index].required_groups[self.selected_group_index]
+        self.group_clipboard = BindingGroup.from_dict(group.to_dict())
+
+    def _paste_group(self) -> None:
+        if self.selected_project_index is None:
+            messagebox.showwarning("提示", "请先选择项目")
+            return
+        if self.group_clipboard is None:
+            messagebox.showwarning("提示", "请先复制分组")
+            return
+        self._commit_group_fields()
+        self._commit_choice_fields()
+        target_project = self.projects[self.selected_project_index]
+        new_group = BindingGroup.from_dict(self.group_clipboard.to_dict())
+        target_project.required_groups.append(new_group)
+        self._refresh_group_list()
+        new_index = len(target_project.required_groups) - 1
+        self.group_list.selection_clear(0, END)
+        self.group_list.selection_set(new_index)
+        self.group_list.event_generate("<<ListboxSelect>>")
 
     def _add_choice(self) -> None:
         if self.selected_project_index is None or self.selected_group_index is None:
