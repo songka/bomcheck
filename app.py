@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import traceback
 from pathlib import Path
+from typing import Callable
 from tkinter import (
     BOTH,
     END,
@@ -25,7 +26,7 @@ from tkinter import (
 from tkinter import ttk
 
 from bomcheck_app.binding_library import BindingChoice, BindingGroup, BindingLibrary, BindingProject
-from bomcheck_app.config import load_config
+from bomcheck_app.config import AppConfig, load_config, save_config
 from bomcheck_app.excel_processor import ExcelProcessor, SaveWorkbookError, format_quantity_text
 from bomcheck_app.models import ExecutionResult
 
@@ -36,16 +37,34 @@ class Application:
     def __init__(self, root: Tk):
         self.root = root
         self.root.title("料号检测系统")
-        self.config = load_config(CONFIG_PATH)
-        self.binding_library = BindingLibrary(self.config.binding_library)
-        self.binding_library.load()
-        self.processor = ExcelProcessor(self.config)
+        self.config_path: Path = CONFIG_PATH
+        self._apply_config(self.config_path)
         self.selected_file: Path | None = None
         self._execution_lock = threading.Lock()
         self._execution_thread: threading.Thread | None = None
         self._build_ui()
+        self._refresh_config_display()
 
     def _build_ui(self) -> None:
+        config_frame = Frame(self.root)
+        config_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
+
+        Label(config_frame, text="配置文件：").pack(side=LEFT)
+        self.config_path_var = StringVar()
+        self.config_entry = Entry(
+            config_frame,
+            width=50,
+            textvariable=self.config_path_var,
+            state="readonly",
+        )
+        self.config_entry.pack(side=LEFT, padx=5)
+        Button(config_frame, text="设置数据库路径", command=self._open_database_dialog).pack(
+            side=LEFT
+        )
+        Button(config_frame, text="重新加载", command=self._reload_config).pack(
+            side=LEFT, padx=5
+        )
+
         file_frame = Frame(self.root)
         file_frame.pack(fill=BOTH, padx=10, pady=10)
 
@@ -59,6 +78,9 @@ class Application:
         self.execute_button = Button(action_frame, text="执行", command=self._execute)
         self.execute_button.pack(side=LEFT)
         Button(action_frame, text="编辑绑定料号", command=self._open_binding_editor).pack(side=LEFT, padx=5)
+        Button(action_frame, text="编辑重要物料", command=self._open_important_material_editor).pack(
+            side=LEFT, padx=5
+        )
 
         result_frame = Frame(self.root)
         result_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
@@ -72,6 +94,58 @@ class Application:
         self.result_text.pack(side=LEFT, fill=BOTH, expand=True)
         self.result_text.config(yscrollcommand=scrollbar.set)
         scrollbar.config(command=self.result_text.yview)
+
+    def _apply_config(self, path: Path) -> None:
+        config = load_config(path)
+        binding_library = BindingLibrary(config.binding_library)
+        binding_library.load()
+        processor = ExcelProcessor(config)
+        self.config_path = path
+        self.config = config
+        self.binding_library = binding_library
+        self.processor = processor
+        self._refresh_config_display()
+
+    def _refresh_config_display(self) -> None:
+        if hasattr(self, "config_path_var"):
+            self.config_entry.config(state="normal")
+            self.config_path_var.set(str(self.config_path))
+            self.config_entry.config(state="readonly")
+
+    def _open_database_dialog(self) -> None:
+        DatabaseConfigDialog(
+            self.root,
+            self.config,
+            on_save=self._update_database_paths,
+        )
+
+    def _reload_config(self) -> None:
+        try:
+            self._apply_config(self.config_path)
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("加载失败", f"重新加载配置失败：{exc}")
+        else:
+            messagebox.showinfo("配置已更新", f"已重新加载：{self.config_path}")
+
+    def _update_database_paths(self, invalid_path: Path, binding_path: Path) -> bool:
+        previous_config = self.config
+        new_config = AppConfig(
+            invalid_part_db=invalid_path,
+            binding_library=binding_path,
+            important_materials=previous_config.important_materials,
+        )
+
+        save_config(self.config_path, new_config)
+        try:
+            self._apply_config(self.config_path)
+        except Exception as exc:  # pragma: no cover - user feedback
+            save_config(self.config_path, previous_config)
+            self._apply_config(self.config_path)
+            messagebox.showerror("保存失败", f"更新数据库路径失败：{exc}")
+            return False
+
+        messagebox.showinfo("配置已更新", "数据库路径已保存。")
+        return True
 
     def _choose_file(self) -> None:
         file_path = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx"), ("Excel", "*.xlsm")])
@@ -157,6 +231,9 @@ class Application:
 
     def _open_binding_editor(self) -> None:
         BindingEditor(self.root, self.binding_library)
+
+    def _open_important_material_editor(self) -> None:
+        ImportantMaterialEditor(self.root, self.config.important_materials)
 
     def _build_summary_lines(self, result: ExecutionResult) -> list[str]:
         lines = [
@@ -827,6 +904,132 @@ class BindingEditor:
             messagebox.showerror("错误", f"保存失败：{exc}")
             return
         messagebox.showinfo("完成", "保存成功")
+
+
+class DatabaseConfigDialog:
+    def __init__(
+        self,
+        master,
+        config: AppConfig,
+        on_save: Callable[[Path, Path], bool],
+    ) -> None:
+        self.on_save = on_save
+        self.config = config
+        self.top = Toplevel(master)
+        self.top.title("数据库路径设置")
+        self.invalid_var = StringVar(value=str(config.invalid_part_db))
+        self.binding_var = StringVar(value=str(config.binding_library))
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        frame = Frame(self.top)
+        frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
+
+        invalid_frame = Frame(frame)
+        invalid_frame.pack(fill=BOTH, pady=5)
+        Label(invalid_frame, text="失效料号数据库：").pack(side=LEFT)
+        Entry(invalid_frame, width=45, textvariable=self.invalid_var).pack(side=LEFT, padx=5)
+        Button(
+            invalid_frame,
+            text="浏览",
+            command=self._choose_invalid,
+        ).pack(side=LEFT)
+
+        binding_frame = Frame(frame)
+        binding_frame.pack(fill=BOTH, pady=5)
+        Label(binding_frame, text="绑定料号数据库：").pack(side=LEFT)
+        Entry(binding_frame, width=45, textvariable=self.binding_var).pack(side=LEFT, padx=5)
+        Button(
+            binding_frame,
+            text="浏览",
+            command=self._choose_binding,
+        ).pack(side=LEFT)
+
+        button_frame = Frame(frame)
+        button_frame.pack(fill=BOTH, pady=(10, 0))
+        Button(button_frame, text="保存", command=self._save).pack(side=LEFT)
+        Button(button_frame, text="取消", command=self.top.destroy).pack(side=RIGHT)
+
+    def _choose_invalid(self) -> None:
+        file_path = filedialog.askopenfilename(
+            title="选择失效料号数据库",
+            filetypes=[("Excel", "*.xlsx *.xlsm"), ("所有文件", "*.*")],
+        )
+        if file_path:
+            self.invalid_var.set(file_path)
+
+    def _choose_binding(self) -> None:
+        file_path = filedialog.askopenfilename(
+            title="选择绑定料号数据库",
+            filetypes=[("脚本", "*.js *.json"), ("所有文件", "*.*")],
+        )
+        if file_path:
+            self.binding_var.set(file_path)
+
+    def _save(self) -> None:
+        invalid_value = self.invalid_var.get().strip()
+        binding_value = self.binding_var.get().strip()
+        if not invalid_value or not binding_value:
+            messagebox.showerror("错误", "请填写所有数据库路径")
+            return
+
+        success = self.on_save(Path(invalid_value), Path(binding_value))
+        if success:
+            self.top.destroy()
+
+
+class ImportantMaterialEditor:
+    def __init__(self, master, path: Path):
+        self.path = path
+        self.top = Toplevel(master)
+        self.top.title("重要物料编辑")
+        self._build_ui()
+        self._load_content()
+
+    def _build_ui(self) -> None:
+        path_frame = Frame(self.top)
+        path_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
+        Label(path_frame, text="文件路径：").pack(side=LEFT)
+        self.path_label = Label(path_frame, text=str(self.path), anchor="w")
+        self.path_label.pack(side=LEFT, fill=BOTH, expand=True)
+
+        text_frame = Frame(self.top)
+        text_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        scrollbar = Scrollbar(text_frame)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        self.text = Text(text_frame, wrap="none")
+        self.text.pack(side=LEFT, fill=BOTH, expand=True)
+        self.text.config(yscrollcommand=scrollbar.set)
+        scrollbar.config(command=self.text.yview)
+
+        button_frame = Frame(self.top)
+        button_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
+        Button(button_frame, text="保存", command=self._save_content).pack(side=LEFT)
+        Button(button_frame, text="重新加载", command=self._load_content).pack(side=LEFT, padx=5)
+        Button(button_frame, text="关闭", command=self.top.destroy).pack(side=RIGHT)
+
+    def _load_content(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if not self.path.exists():
+                self.path.touch()
+            content = self.path.read_text(encoding="utf-8")
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("加载失败", f"读取重要物料失败：{exc}")
+            content = ""
+        self.text.delete(1.0, END)
+        self.text.insert(END, content)
+
+    def _save_content(self) -> None:
+        content = self.text.get("1.0", END)
+        if content.endswith("\n"):
+            content = content[:-1]
+        try:
+            self.path.write_text(content, encoding="utf-8")
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("保存失败", f"写入重要物料失败：{exc}")
+        else:
+            messagebox.showinfo("保存成功", f"重要物料已保存到：{self.path}")
 
 
 def main() -> None:
