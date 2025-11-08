@@ -255,6 +255,8 @@ class Application:
         return ["", "调试信息：", *[f"- {log}" for log in result.debug_logs]]
 
 class BindingEditor:
+    CONDITION_MODE_OPTIONS = ("", "ALL", "ANY", "NOTANY")
+
     def __init__(self, master, binding_library: BindingLibrary):
         self.binding_library = binding_library
         self.top = Toplevel(master)
@@ -369,7 +371,16 @@ class BindingEditor:
         Entry(choice_edit, textvariable=self.choice_desc_var).grid(row=1, column=1, sticky="ew")
         Label(choice_edit, text="条件模式：").grid(row=2, column=0, sticky="w")
         self.choice_mode_var = StringVar()
-        Entry(choice_edit, textvariable=self.choice_mode_var).grid(row=2, column=1, sticky="ew")
+        self.choice_mode_combo = ttk.Combobox(
+            choice_edit,
+            textvariable=self.choice_mode_var,
+            values=self.CONDITION_MODE_OPTIONS,
+            state="readonly",
+        )
+        self.choice_mode_combo.grid(row=2, column=1, sticky="ew")
+        self.choice_mode_combo.bind(
+            "<<ComboboxSelected>>", lambda _event: self._commit_choice_fields()
+        )
         Label(choice_edit, text="条件料号：").grid(row=3, column=0, sticky="w")
         self.choice_condition_var = StringVar()
         Entry(choice_edit, textvariable=self.choice_condition_var).grid(row=3, column=1, sticky="ew")
@@ -543,7 +554,8 @@ class BindingEditor:
         self.choice_tree.focus("")
         self.choice_part_var.set("")
         self.choice_desc_var.set("")
-        self.choice_mode_var.set("")
+        self.choice_mode_combo.configure(values=self.CONDITION_MODE_OPTIONS)
+        self._set_choice_mode_value("")
         self.choice_condition_var.set("")
         self.choice_number_var.set("")
         self.selected_choice_index = None
@@ -562,9 +574,19 @@ class BindingEditor:
         ]
         self.choice_part_var.set(choice.part_no)
         self.choice_desc_var.set(choice.desc)
-        self.choice_mode_var.set(choice.condition_mode or "")
+        self._set_choice_mode_value(choice.condition_mode or "")
         self.choice_condition_var.set(",".join(choice.condition_part_nos))
         self.choice_number_var.set("" if choice.number is None else str(choice.number))
+
+    def _set_choice_mode_value(self, value: str) -> None:
+        if not hasattr(self, "choice_mode_combo"):
+            self.choice_mode_var.set(value)
+            return
+        current_values = list(self.choice_mode_combo.cget("values"))
+        if value not in current_values:
+            current_values.append(value)
+            self.choice_mode_combo.configure(values=current_values)
+        self.choice_mode_var.set(value)
 
     def _commit_choice_fields(self) -> None:
         if (

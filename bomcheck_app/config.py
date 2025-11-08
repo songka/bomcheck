@@ -64,6 +64,11 @@ def save_config(path: Path, config: AppConfig) -> None:
     path.write_text(json.dumps(config.to_dict(base_dir), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _escape_invalid_backslashes(raw_text: str) -> str:
+    pattern = r"(?<!\\)\\(?![\\/\"bfnrtu])"
+    return re.sub(pattern, r"\\\\", raw_text)
+
+
 def _resolve_path(value: str | None, base_dir: Path) -> Path:
     if not value:
         return base_dir
