@@ -42,19 +42,22 @@ def normalize_part_no(value: str) -> str:
 BLACK_FILL = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
 
 
+_HEX_COLOR_PATTERN = re.compile(r"^[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$")
+
+
 def _get_fill_rgb(fill: PatternFill) -> str:
     color = getattr(fill, "start_color", None)
     if color is None:
         return ""
     rgb_value = getattr(color, "rgb", None)
-    if isinstance(rgb_value, str):
+    if isinstance(rgb_value, str) and _HEX_COLOR_PATTERN.fullmatch(rgb_value):
         return rgb_value
     if hasattr(rgb_value, "rgb"):
         inner = getattr(rgb_value, "rgb")
-        if isinstance(inner, str):
+        if isinstance(inner, str) and _HEX_COLOR_PATTERN.fullmatch(inner):
             return inner
     value = getattr(color, "value", None)
-    if isinstance(value, str):
+    if isinstance(value, str) and _HEX_COLOR_PATTERN.fullmatch(value):
         return value
     return ""
 
@@ -68,14 +71,18 @@ def _is_black_fill(cell: Cell) -> bool:
     if rgb:
         if len(rgb) == 6:
             rgb = f"FF{rgb}"
-        if rgb in {"000000", "FF000000"}:
+        if len(rgb) == 8 and rgb[-6:] == "000000":
             return True
     color = getattr(fill, "start_color", None)
     if color is None:
         return False
     theme = getattr(color, "theme", None)
-    tint = getattr(color, "tint", 0)
-    if theme in (0, 1) and (tint in (0, None) or abs(tint) < 1e-9):
+    try:
+        theme_value = int(theme) if theme is not None else None
+    except (TypeError, ValueError):
+        theme_value = None
+    tint = getattr(color, "tint", 0) or 0
+    if theme_value == 0 and abs(tint) < 1e-9:
         return True
     return False
 
@@ -333,8 +340,19 @@ class ExcelProcessor:
 
                 part_cell = row[part_col_idx]
                 summary.total_invalid_found += 1
+
+                record = ReplacementRecord(
+                    invalid_part_no=invalid_no,
+                    invalid_desc=invalid_desc,
+                    replacement_part_no=replacement_no,
+                    replacement_desc=replacement_desc,
+                    sheet_name=ws.title,
+                    row_index=row_idx,
+                )
+
                 if self._row_already_replaced(row, part_col_idx, part_cell, replacement_no):
                     summary.total_invalid_previously_marked += 1
+                    summary.records.append(record)
                     debug_logs.append(
                         f"[{ws.title}] 行{row_idx} 失效料号 {part_no} 已标记替换，跳过"
                     )
@@ -349,16 +367,7 @@ class ExcelProcessor:
                     ws.cell(row=row_idx, column=replacement_col + 1).value = replacement_desc
                     summary.total_replaced += 1
 
-                summary.records.append(
-                    ReplacementRecord(
-                        invalid_part_no=invalid_no,
-                        invalid_desc=invalid_desc,
-                        replacement_part_no=replacement_no,
-                        replacement_desc=replacement_desc,
-                        sheet_name=ws.title,
-                        row_index=row_idx,
-                    )
-                )
+                summary.records.append(record)
 
                 debug_logs.append(
                     f"[{ws.title}] 行{row_idx} 命中失效料号 {part_no} -> {replacement_no or '无替换'}"
@@ -415,9 +424,10 @@ class ExcelProcessor:
         part_cell = row[part_col_idx]
         raw_value = part_cell.value
         text = str(raw_value).strip() if raw_value not in (None, "") else ""
+        normalized = normalize_part_no(text) if text else ""
+        is_probable = bool(text and _is_probable_part_number(text))
 
-        if text and not _is_black_fill(part_cell) and _is_probable_part_number(text):
-            normalized = normalize_part_no(text)
+        if text and is_probable and not _is_black_fill(part_cell):
             return normalized, text, None
 
         replacement = self._find_replacement_in_row(row, part_col_idx)
@@ -425,14 +435,10 @@ class ExcelProcessor:
             display_no, normalized, desc_value = replacement
             return normalized, display_no, desc_value
 
-        if text and not _is_probable_part_number(text):
+        if text and not is_probable:
             return None
 
-        if _is_black_fill(part_cell):
-            return None
-
-        if text:
-            normalized = normalize_part_no(text)
+        if text and is_probable:
             return normalized, text, None
 
         return None
@@ -554,9 +560,15 @@ class ExcelProcessor:
                 if parsed is None:
                     failure_count += 1
                     continue
-                numeric_count += 1
-                if isclose(parsed, round(parsed), abs_tol=1e-6):
+
+                is_positive_integer = parsed > 0 and isclose(
+                    parsed, round(parsed), abs_tol=1e-6
+                )
+                if is_positive_integer:
+                    numeric_count += 1
                     integer_count += 1
+                else:
+                    failure_count += 1
             if numeric_count:
                 numeric_scores.append(
                     (col_idx, integer_count, numeric_count, failure_count, total_count)
