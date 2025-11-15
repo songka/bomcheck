@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import traceback
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Dict
 from tkinter import (
     BOTH,
     END,
@@ -55,41 +55,69 @@ class Application:
         self._refresh_config_entry()
 
     def _build_ui(self) -> None:
-        config_frame = Frame(self.root)
-        config_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill=BOTH, expand=True)
 
-        Label(config_frame, text="配置文件：").pack(side=LEFT)
-        self.config_entry = Entry(config_frame, width=50, state="readonly")
+        operation_tab = Frame(notebook)
+        config_tab = Frame(notebook)
+        notebook.add(operation_tab, text="执行")
+        notebook.add(config_tab, text="配置")
+
+        config_file_frame = Frame(config_tab)
+        config_file_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
+
+        Label(config_file_frame, text="配置文件：").pack(side=LEFT)
+        self.config_entry = Entry(config_file_frame, width=50, state="readonly")
         self.config_entry.pack(side=LEFT, padx=5)
-        Button(config_frame, text="编辑数据文件", command=self._open_data_file_editor).pack(
-            side=LEFT
-        )
-        Button(config_frame, text="重新加载", command=self._reload_config).pack(side=LEFT, padx=5)
+        Button(
+            config_file_frame,
+            text="编辑数据文件",
+            command=self._open_data_file_editor,
+        ).pack(side=LEFT)
+        Button(
+            config_file_frame, text="重新加载", command=self._reload_config
+        ).pack(side=LEFT, padx=5)
 
-        file_frame = Frame(self.root)
-        file_frame.pack(fill=BOTH, padx=10, pady=10)
+        config_action_frame = Frame(config_tab)
+        config_action_frame.pack(fill=BOTH, padx=10, pady=10, anchor="w")
+        Button(
+            config_action_frame,
+            text="编辑绑定料号",
+            command=self._open_binding_editor,
+        ).pack(side=LEFT)
+        Button(
+            config_action_frame,
+            text="编辑重要物料",
+            command=self._open_important_material_editor,
+        ).pack(side=LEFT, padx=5)
+        Button(
+            config_action_frame,
+            text="系统料号查询",
+            command=self._open_system_part_viewer,
+        ).pack(side=LEFT, padx=5)
+        Button(
+            config_action_frame,
+            text="编辑屏蔽申请人",
+            command=self._open_blocked_applicant_editor,
+        ).pack(side=LEFT, padx=5)
+
+        operation_container = Frame(operation_tab)
+        operation_container.pack(fill=BOTH, expand=True)
+
+        file_frame = Frame(operation_container)
+        file_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
 
         Label(file_frame, text="选择BOM Excel文件：").pack(side=LEFT)
         self.file_entry = Entry(file_frame, width=50)
         self.file_entry.pack(side=LEFT, padx=5)
         Button(file_frame, text="浏览", command=self._choose_file).pack(side=LEFT)
 
-        action_frame = Frame(self.root)
-        action_frame.pack(fill=BOTH, padx=10, pady=5)
-        self.execute_button = Button(action_frame, text="执行", command=self._execute)
+        execute_frame = Frame(operation_container)
+        execute_frame.pack(fill=BOTH, padx=10, pady=5)
+        self.execute_button = Button(execute_frame, text="执行", command=self._execute)
         self.execute_button.pack(side=LEFT)
-        Button(action_frame, text="编辑绑定料号", command=self._open_binding_editor).pack(side=LEFT, padx=5)
-        Button(action_frame, text="编辑重要物料", command=self._open_important_material_editor).pack(
-            side=LEFT, padx=5
-        )
-        Button(action_frame, text="系统料号查询", command=self._open_system_part_viewer).pack(
-            side=LEFT, padx=5
-        )
-        Button(action_frame, text="编辑屏蔽申请人", command=self._open_blocked_applicant_editor).pack(
-            side=LEFT, padx=5
-        )
 
-        result_frame = Frame(self.root)
+        result_frame = Frame(operation_container)
         result_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
         Label(result_frame, text="执行结果：").pack(anchor="w")
 
@@ -563,6 +591,7 @@ class SystemPartViewer:
         self.top = Toplevel(master)
         self.top.title("系统料号查询")
         self.top.transient(master)
+        self.top.resizable(True, True)
         self.search_var = StringVar()
         self.status_var = StringVar()
         self._build_ui()
@@ -606,6 +635,7 @@ class SystemPartViewer:
         search_entry.bind("<Return>", lambda _event: self._perform_search())
         Button(search_frame, text="查找", command=self._perform_search).pack(side=LEFT, padx=5)
         Button(search_frame, text="清除", command=self._clear_search).pack(side=LEFT)
+        Button(search_frame, text="最大化", command=self._maximize_window).pack(side=LEFT, padx=5)
 
         tree_frame = Frame(main_frame)
         tree_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
@@ -623,12 +653,18 @@ class SystemPartViewer:
         self.tree.heading("description", text="描述", anchor="w")
         self.tree.heading("unit", text="单位", anchor="w")
         self.tree.heading("applicant", text="申请人", anchor="w")
-        self.tree.heading("inventory", text="库存", anchor="w")
-        self.tree.column("#0", width=220, minwidth=150, anchor="w")
-        self.tree.column("description", width=400, minwidth=200, anchor="w")
-        self.tree.column("unit", width=80, anchor="w")
-        self.tree.column("applicant", width=160, minwidth=120, anchor="w")
-        self.tree.column("inventory", width=80, anchor="e")
+        self.tree.heading("inventory", text="库存", anchor="e")
+        self.tree.column("#0", width=240, minwidth=160, anchor="w", stretch=False)
+        self.tree.column("description", width=520, minwidth=320, anchor="w", stretch=True)
+        self.tree.column("unit", width=70, minwidth=60, anchor="w", stretch=False)
+        self.tree.column("applicant", width=180, minwidth=140, anchor="w", stretch=False)
+        self.tree.column("inventory", width=90, minwidth=70, anchor="e", stretch=False)
+        self.tree.tag_configure("category", font=("TkDefaultFont", 10, "bold"))
+        self.tree.tag_configure("category-level-1", background="#eef2ff")
+        self.tree.tag_configure("category-level-2", background="#f4f7ff")
+        self.tree.tag_configure("category-level-3", background="#f9fbff")
+        self.tree.tag_configure("category-level-4", background="#f0fbf0")
+        self.tree.tag_configure("part", background="white")
 
         status_frame = Frame(main_frame)
         status_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
@@ -672,13 +708,20 @@ class SystemPartViewer:
         else:
             self.status_var.set(f"共 {total} 条")
 
-    def _insert_nodes(self, parent: str, node: Dict[str, Dict]) -> None:
-        for category in sorted(node.get("children", {})):
-            child = node["children"][category]
-            item_id = self.tree.insert(parent, "end", text=category, values=("", "", "", ""))
-            self._insert_nodes(item_id, child)
-        for record in node.get("parts", []):
-            self._insert_part(parent, record)
+    def _insert_nodes(self, parent: str, node: Dict[str, Dict], depth: int = 1) -> None:
+        for category, child in self._iter_collapsed_children(node, depth):
+            tags = ("category", f"category-level-{depth}")
+            item_id = self.tree.insert(
+                parent, "end", text=category, values=("", "", "", ""), tags=tags
+            )
+            if depth >= self._max_category_depth:
+                for record in self._collect_all_parts(child):
+                    self._insert_part(item_id, record)
+            else:
+                self._insert_nodes(item_id, child, depth + 1)
+        if depth <= self._max_category_depth:
+            for record in node.get("parts", []):
+                self._insert_part(parent, record)
 
     def _insert_part(self, parent: str, record: SystemPartRecord) -> None:
         self.tree.insert(
@@ -691,7 +734,50 @@ class SystemPartViewer:
                 record.applicant,
                 record.inventory_display,
             ),
+            tags=("part",),
         )
+
+    @property
+    def _max_category_depth(self) -> int:
+        return 4
+
+    def _iter_collapsed_children(self, node: Dict[str, Dict], depth: int) -> list[tuple[str, Dict]]:
+        children = node.get("children", {})
+        collapsed: list[tuple[str, Dict]] = []
+        for category in sorted(children):
+            collapsed.append(self._collapse_category_path(category, children[category]))
+        return collapsed
+
+    def _collapse_category_path(
+        self, label: str, node: Dict[str, Dict]
+    ) -> tuple[str, Dict[str, Dict]]:
+        current_label = label
+        current_node = node
+        while (
+            not current_node.get("parts")
+            and len(current_node.get("children", {})) == 1
+        ):
+            next_label, next_node = next(iter(current_node["children"].items()))
+            current_label = f"{current_label} / {next_label}"
+            current_node = next_node
+        return current_label, current_node
+
+    def _collect_all_parts(self, node: Dict[str, Dict]) -> list[SystemPartRecord]:
+        parts = list(node.get("parts", []))
+        for child in node.get("children", {}).values():
+            parts.extend(self._collect_all_parts(child))
+        return parts
+
+    def _maximize_window(self) -> None:
+        try:
+            self.top.state("zoomed")
+        except Exception:
+            try:
+                self.top.attributes("-zoomed", True)
+            except Exception:
+                screen_width = self.top.winfo_screenwidth()
+                screen_height = self.top.winfo_screenheight()
+                self.top.geometry(f"{screen_width}x{screen_height}+0+0")
 
     def _expand_all(self) -> None:
         def expand(item: str) -> None:
