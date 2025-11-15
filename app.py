@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 import traceback
+import re
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable, Dict
@@ -33,7 +34,12 @@ from openpyxl import Workbook, load_workbook
 
 from bomcheck_app.binding_library import BindingChoice, BindingGroup, BindingLibrary, BindingProject
 from bomcheck_app.config import AppConfig, load_config, save_config
-from bomcheck_app.excel_processor import ExcelProcessor, SaveWorkbookError, format_quantity_text
+from bomcheck_app.excel_processor import (
+    ExcelProcessor,
+    SaveWorkbookError,
+    format_quantity_text,
+    normalize_part_no,
+)
 from bomcheck_app.models import ExecutionResult
 from bomcheck_app.system_parts import (
     SystemPartRecord,
@@ -1024,6 +1030,7 @@ class InvalidPartEditor:
         self.part_lookup = part_lookup
         self.entries: list[InvalidPartEntry] = []
         self.selected_index: int | None = None
+        self.filter_var = StringVar()
         self._suspend_events = False
         self.top = Toplevel(master)
         self.top.title("失效料号库编辑")
@@ -1070,7 +1077,14 @@ class InvalidPartEditor:
         action_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
         Button(action_frame, text="新增", command=self._add_entry).pack(side=LEFT)
         Button(action_frame, text="删除", command=self._delete_entry).pack(side=LEFT, padx=5)
-        Button(action_frame, text="粘贴", command=self._paste_entries).pack(side=LEFT)
+        Button(action_frame, text="复制", command=self._copy_selected_entry).pack(side=LEFT)
+        Button(action_frame, text="粘贴", command=self._paste_entries).pack(side=LEFT, padx=5)
+        Label(action_frame, text="搜索：").pack(side=LEFT, padx=(10, 0))
+        search_entry = Entry(action_frame, textvariable=self.filter_var, width=18)
+        search_entry.pack(side=LEFT)
+        search_entry.bind("<Return>", lambda _event: self._apply_filter())
+        Button(action_frame, text="查找", command=self._apply_filter).pack(side=LEFT, padx=5)
+        Button(action_frame, text="清空", command=self._clear_filter).pack(side=LEFT)
 
         detail_frame = Frame(self.top)
         detail_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
@@ -1101,6 +1115,62 @@ class InvalidPartEditor:
     def _handle_paste_shortcut(self, _event) -> str:
         self._paste_entries()
         return "break"
+
+    def _copy_selected_entry(self) -> None:
+        self._commit_current_entry()
+        if self.selected_index is None or not (0 <= self.selected_index < len(self.entries)):
+            messagebox.showinfo("复制", "请先选择需要复制的记录。")
+            return
+        entry = self.entries[self.selected_index]
+        row_text = "\t".join(
+            [
+                entry.invalid_part,
+                entry.invalid_desc,
+                entry.replacement_part,
+                entry.replacement_desc,
+            ]
+        )
+        try:
+            self.top.clipboard_clear()
+            self.top.clipboard_append(row_text)
+        except Exception as exc:
+            messagebox.showerror("复制失败", f"无法写入剪贴板：{exc}")
+
+    def _apply_filter(self) -> None:
+        self._refresh_tree()
+
+    def _clear_filter(self) -> None:
+        if not self.filter_var.get():
+            return
+        self.filter_var.set("")
+        self._refresh_tree()
+
+    def _get_filtered_indices(self) -> list[int]:
+        query = self.filter_var.get().strip().lower()
+        if not query:
+            return list(range(len(self.entries)))
+        tokens = [segment.strip().lower() for segment in re.split(r"[\s,;，；]+", query)]
+        tokens = [token for token in tokens if token]
+        if not tokens:
+            return list(range(len(self.entries)))
+        filtered: list[int] = []
+        for idx, entry in enumerate(self.entries):
+            fields = [
+                entry.invalid_part.lower(),
+                entry.invalid_desc.lower(),
+                entry.replacement_part.lower(),
+                entry.replacement_desc.lower(),
+            ]
+            normalized_invalid = normalize_part_no(entry.invalid_part)
+            if normalized_invalid:
+                fields.append(normalized_invalid.lower())
+            normalized_replacement = normalize_part_no(entry.replacement_part)
+            if normalized_replacement:
+                fields.append(normalized_replacement.lower())
+            haystack = " ".join(fields)
+            if all(token in haystack for token in tokens):
+                filtered.append(idx)
+        return filtered
 
     def _on_invalid_part_change(self, *_args) -> None:
         if self._suspend_events:
@@ -1181,9 +1251,13 @@ class InvalidPartEditor:
             self._clear_entry_fields()
 
     def _refresh_tree(self) -> None:
+        selected_ids = self.tree.selection()
+        previous_id = selected_ids[0] if selected_ids else None
+        filtered_indices = self._get_filtered_indices()
         for item in self.tree.get_children():
             self.tree.delete(item)
-        for idx, entry in enumerate(self.entries):
+        for idx in filtered_indices:
+            entry = self.entries[idx]
             values = (
                 entry.invalid_part,
                 entry.invalid_desc,
@@ -1192,6 +1266,20 @@ class InvalidPartEditor:
             )
             self.tree.insert("", "end", iid=str(idx), values=values)
         self.tree.update_idletasks()
+        valid_ids = {str(idx) for idx in filtered_indices}
+        if previous_id and previous_id in valid_ids:
+            self.tree.selection_set(previous_id)
+            self.tree.focus(previous_id)
+            self.tree.see(previous_id)
+        elif filtered_indices:
+            first_id = str(filtered_indices[0])
+            self.tree.selection_set(first_id)
+            self.tree.focus(first_id)
+            self.tree.see(first_id)
+        else:
+            self.tree.selection_set(())
+            self.selected_index = None
+            self._clear_entry_fields()
 
     def _on_tree_select(self) -> None:
         if self.selected_index is not None:
@@ -1316,13 +1404,123 @@ class InvalidPartEditor:
             return
         index = max(0, min(index, len(self.entries) - 1))
         item_id = str(index)
+        if not self.tree.exists(item_id):
+            visible = self.tree.get_children()
+            if visible:
+                first_id = visible[0]
+                self.tree.selection_set(first_id)
+                self.tree.focus(first_id)
+                self.tree.see(first_id)
+            else:
+                self.tree.selection_set(())
+                self.selected_index = None
+                self._clear_entry_fields()
+            return
         self.tree.selection_set(item_id)
         self.tree.focus(item_id)
         self.tree.see(item_id)
-        self._on_tree_select()
+
+    def _collect_clean_entries(self) -> list[InvalidPartEntry]:
+        cleaned: list[InvalidPartEntry] = []
+        seen_pairs: set[tuple[str, str]] = set()
+        for entry in self.entries:
+            invalid_part = entry.invalid_part.strip()
+            invalid_desc = entry.invalid_desc.strip()
+            replacement_part = entry.replacement_part.strip()
+            replacement_desc = entry.replacement_desc.strip()
+            if not any([invalid_part, invalid_desc, replacement_part, replacement_desc]):
+                continue
+            key = (
+                normalize_part_no(invalid_part),
+                normalize_part_no(replacement_part),
+            )
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            cleaned.append(
+                InvalidPartEntry(
+                    invalid_part=invalid_part,
+                    invalid_desc=invalid_desc,
+                    replacement_part=replacement_part,
+                    replacement_desc=replacement_desc,
+                )
+            )
+        return cleaned
+
+    def _resolve_replacement_conflicts(
+        self, entries: list[InvalidPartEntry]
+    ) -> list[InvalidPartEntry]:
+        replacement_map: dict[str, set[int]] = {}
+        for idx, entry in enumerate(entries):
+            replacement_key = normalize_part_no(entry.replacement_part)
+            if replacement_key:
+                replacement_map.setdefault(replacement_key, set()).add(idx)
+
+        indices_to_remove: set[int] = set()
+        for idx, entry in enumerate(entries):
+            if idx in indices_to_remove:
+                continue
+            invalid_key = normalize_part_no(entry.invalid_part)
+            if not invalid_key:
+                continue
+            source_indices = [
+                source_idx
+                for source_idx in replacement_map.get(invalid_key, set())
+                if source_idx != idx
+            ]
+            if not source_indices:
+                continue
+            for source_idx in source_indices:
+                if source_idx in indices_to_remove:
+                    continue
+                source_entry = entries[source_idx]
+                old_key = normalize_part_no(source_entry.replacement_part)
+                source_entry.replacement_part = entry.replacement_part
+                source_entry.replacement_desc = entry.replacement_desc
+                if old_key:
+                    holders = replacement_map.get(old_key)
+                    if holders:
+                        holders.discard(source_idx)
+                        if not holders:
+                            replacement_map.pop(old_key, None)
+                new_key = normalize_part_no(source_entry.replacement_part)
+                if new_key:
+                    replacement_map.setdefault(new_key, set()).add(source_idx)
+            indices_to_remove.add(idx)
+
+        if not indices_to_remove:
+            return entries
+
+        return [entry for i, entry in enumerate(entries) if i not in indices_to_remove]
+
+    def _find_duplicate_invalids(self, entries: list[InvalidPartEntry]) -> list[str]:
+        groups: dict[str, list[str]] = {}
+        for entry in entries:
+            invalid_key = normalize_part_no(entry.invalid_part)
+            if not invalid_key:
+                continue
+            groups.setdefault(invalid_key, []).append(entry.invalid_part or invalid_key)
+
+        duplicates: list[str] = []
+        for display_list in groups.values():
+            if len(display_list) > 1:
+                display_values = sorted({value for value in display_list if value})
+                if not display_values:
+                    continue
+                duplicates.append(", ".join(display_values))
+        return duplicates
 
     def _save_entries(self) -> None:
         self._commit_current_entry()
+        cleaned_entries = self._collect_clean_entries()
+        cleaned_entries = self._resolve_replacement_conflicts(cleaned_entries)
+        duplicate_invalids = self._find_duplicate_invalids(cleaned_entries)
+        if duplicate_invalids:
+            message = "\n".join(duplicate_invalids)
+            messagebox.showerror("保存失败", f"存在重复的失效料号：\n{message}")
+            return
+        self.entries = cleaned_entries
+        self._refresh_tree()
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
@@ -1332,8 +1530,15 @@ class InvalidPartEditor:
         sheet = workbook.active
         sheet.title = "失效料号"
         sheet.append(["失效料号", "失效描述", "替换料号", "替换描述"])
-        for entry in self.entries:
-            if not any([entry.invalid_part, entry.invalid_desc, entry.replacement_part, entry.replacement_desc]):
+        for entry in cleaned_entries:
+            if not any(
+                [
+                    entry.invalid_part,
+                    entry.invalid_desc,
+                    entry.replacement_part,
+                    entry.replacement_desc,
+                ]
+            ):
                 continue
             sheet.append(
                 [

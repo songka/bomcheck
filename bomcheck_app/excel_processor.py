@@ -42,13 +42,42 @@ def normalize_part_no(value: str) -> str:
 BLACK_FILL = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
 
 
+def _get_fill_rgb(fill: PatternFill) -> str:
+    color = getattr(fill, "start_color", None)
+    if color is None:
+        return ""
+    rgb_value = getattr(color, "rgb", None)
+    if isinstance(rgb_value, str):
+        return rgb_value
+    if hasattr(rgb_value, "rgb"):
+        inner = getattr(rgb_value, "rgb")
+        if isinstance(inner, str):
+            return inner
+    value = getattr(color, "value", None)
+    if isinstance(value, str):
+        return value
+    return ""
+
+
 def _is_black_fill(cell: Cell) -> bool:
     """判断单元格是否已被填充为黑色。"""
     fill = cell.fill
     if not fill or fill.fill_type != "solid":
         return False
-    rgb = (fill.start_color.rgb or "").upper()
-    return rgb in {"000000", "FF000000"}
+    rgb = _get_fill_rgb(fill).upper()
+    if rgb:
+        if len(rgb) == 6:
+            rgb = f"FF{rgb}"
+        if rgb in {"000000", "FF000000"}:
+            return True
+    color = getattr(fill, "start_color", None)
+    if color is None:
+        return False
+    theme = getattr(color, "theme", None)
+    tint = getattr(color, "tint", 0)
+    if theme in (0, 1) and (tint in (0, None) or abs(tint) < 1e-9):
+        return True
+    return False
 
 
 def _row_has_non_black_value(row: Tuple[Cell, ...], ignore_idx: int) -> bool:

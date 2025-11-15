@@ -10,7 +10,7 @@ from typing import Dict
 from openpyxl import Workbook, load_workbook
 
 from .excel_processor import format_quantity_text, normalize_part_no
-from .text_utils import normalized_variants
+from .text_utils import normalize_text, normalized_variants
 
 
 @dataclass
@@ -254,13 +254,37 @@ def _should_block(applicant: str, blocked: "BlockedApplicantMatcher") -> bool:
     return blocked.matches(applicant)
 
 
-def _matches_query(record: SystemPartRecord, keywords: list[str]) -> bool:
+def _matches_query(record: SystemPartRecord, keywords: list[set[str]]) -> bool:
     if not keywords:
         return True
-    text = " ".join(
-        [record.part_no.lower(), record.description.lower(), record.applicant.lower()]
-    )
-    return all(keyword in text for keyword in keywords)
+    fields: list[str] = []
+    part_no = record.part_no or ""
+    description = record.description or ""
+    applicant = record.applicant or ""
+    for value in (part_no, description, applicant):
+        base = value.strip().lower()
+        if base:
+            fields.append(base)
+        normalized = normalize_text(value)
+        if normalized and normalized not in fields:
+            fields.append(normalized)
+    normalized_part = normalize_part_no(part_no)
+    if normalized_part:
+        fields.append(normalized_part.lower())
+    for keyword_variants in keywords:
+        if not keyword_variants:
+            continue
+        matched = False
+        for text in fields:
+            for variant in keyword_variants:
+                if variant and variant in text:
+                    matched = True
+                    break
+            if matched:
+                break
+        if not matched:
+            return False
+    return True
 
 
 def _safe_str(value) -> str:
@@ -314,9 +338,21 @@ def _split_applicant_tokens(value: str) -> list[str]:
     return tokens
 
 
-def _prepare_keywords(query: str | None) -> list[str]:
+def _prepare_keywords(query: str | None) -> list[set[str]]:
     if not query:
         return []
-    tokens = [segment.strip().lower() for segment in re.split(r"[\s,;，；]+", query)]
-    return [token for token in tokens if token]
+    tokens = [segment.strip() for segment in re.split(r"[\s,;，；]+", query)]
+    keyword_sets: list[set[str]] = []
+    for token in tokens:
+        if not token:
+            continue
+        variants = set(normalized_variants(token))
+        normalized = normalize_text(token)
+        if normalized:
+            variants.add(normalized)
+        base = token.strip().lower()
+        if base:
+            variants.add(base)
+        keyword_sets.append({variant for variant in variants if variant})
+    return keyword_sets
 
