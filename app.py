@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import sys
 import threading
 import traceback
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Callable, Dict
 from tkinter import (
     BOTH,
@@ -27,7 +29,7 @@ from tkinter import (
 from tkinter import ttk
 
 import csv
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from bomcheck_app.binding_library import BindingChoice, BindingGroup, BindingLibrary, BindingProject
 from bomcheck_app.config import AppConfig, load_config, save_config
@@ -39,7 +41,14 @@ from bomcheck_app.system_parts import (
     generate_system_part_excel,
 )
 
-CONFIG_PATH = Path("config.json")
+def _resource_path(relative: str) -> Path:
+    base_path = getattr(sys, "_MEIPASS", None)
+    if base_path:
+        return Path(base_path) / relative
+    return Path(__file__).resolve().parent / relative
+
+
+CONFIG_PATH = _resource_path("config.json")
 
 
 class Application:
@@ -49,6 +58,8 @@ class Application:
         self.config_path: Path = CONFIG_PATH
         self.system_part_path: Path | None = None
         self.blocked_applicant_path: Path | None = None
+        self.system_part_repository: SystemPartRepository | None = None
+        self._system_part_repository_path: Path | None = None
         self.system_part_viewer: SystemPartViewer | None = None
         self.blocked_editor: BlockedApplicantEditor | None = None
         self._apply_config(self.config_path)
@@ -88,14 +99,19 @@ class Application:
         config_action_frame.pack(fill=BOTH, padx=10, pady=10, anchor="w")
         Button(
             config_action_frame,
+            text="编辑失效料号库",
+            command=self._open_invalid_part_editor,
+        ).pack(side=LEFT)
+        Button(
+            config_action_frame,
             text="编辑绑定料号",
             command=self._open_binding_editor,
-        ).pack(side=LEFT)
+        ).pack(side=LEFT, padx=5)
         Button(
             config_action_frame,
             text="编辑重要物料",
             command=self._open_important_material_editor,
-        ).pack(side=LEFT, padx=5)
+        ).pack(side=LEFT)
         Button(
             config_action_frame,
             text="编辑屏蔽申请人",
@@ -104,7 +120,11 @@ class Application:
 
         system_viewer_frame = Frame(system_part_tab)
         system_viewer_frame.pack(fill=BOTH, expand=True)
-        self.system_part_viewer = SystemPartViewer(system_viewer_frame, self.system_part_path)
+        self.system_part_viewer = SystemPartViewer(
+            system_viewer_frame,
+            self.system_part_path,
+            on_repository_update=self._set_system_part_repository,
+        )
         self.system_part_viewer.pack(fill=BOTH, expand=True)
 
         operation_container = Frame(operation_tab)
@@ -146,6 +166,8 @@ class Application:
         self.binding_library = binding_library
         self.processor = processor
         self.system_part_path = config.system_part_db
+        self.system_part_repository = None
+        self._system_part_repository_path = None
         self.blocked_applicant_path = config.blocked_applicants
         if self.system_part_viewer is not None:
             self.system_part_viewer.update_path(config.system_part_db)
@@ -268,7 +290,18 @@ class Application:
         decision_event.wait()
 
     def _open_binding_editor(self) -> None:
-        BindingEditor(self.root, self.binding_library)
+        BindingEditor(
+            self.root,
+            self.binding_library,
+            part_lookup=self._lookup_system_part_desc,
+        )
+
+    def _open_invalid_part_editor(self) -> None:
+        InvalidPartEditor(
+            self.root,
+            self.config.invalid_part_db,
+            part_lookup=self._lookup_system_part_desc,
+        )
 
     def _open_important_material_editor(self) -> None:
         ImportantMaterialEditor(self.root, self.config.important_materials)
@@ -281,6 +314,37 @@ class Application:
             self.root,
             self.blocked_applicant_path,
             on_close=lambda: setattr(self, "blocked_editor", None),
+        )
+
+    def _lookup_system_part_desc(self, part_no: str) -> str:
+        repository = self._get_system_part_repository()
+        if not repository:
+            return ""
+        record = repository.find(part_no)
+        return record.description if record else ""
+
+    def _get_system_part_repository(self) -> SystemPartRepository | None:
+        path = self.system_part_path
+        if not path:
+            return None
+        if (
+            self.system_part_repository is not None
+            and self._system_part_repository_path == path
+        ):
+            return self.system_part_repository
+        try:
+            repository = SystemPartRepository(path)
+        except Exception:
+            return None
+        self._set_system_part_repository(repository)
+        return repository
+
+    def _set_system_part_repository(
+        self, repository: SystemPartRepository | None
+    ) -> None:
+        self.system_part_repository = repository
+        self._system_part_repository_path = (
+            repository.path if repository is not None else None
         )
 
     def _build_summary_lines(self, result: ExecutionResult) -> list[str]:
@@ -568,12 +632,19 @@ class DataFileEditor:
 
 
 class SystemPartViewer(Frame):
-    def __init__(self, master, path: Path | None) -> None:
+    def __init__(
+        self,
+        master,
+        path: Path | None,
+        *,
+        on_repository_update: Callable[[SystemPartRepository | None], None] | None = None,
+    ) -> None:
         super().__init__(master)
         self.path: Path | None = path
         self.repository: SystemPartRepository | None = None
         self.search_var = StringVar()
         self.status_var = StringVar()
+        self.on_repository_update = on_repository_update
         self._build_ui()
         self.update_path(path)
 
@@ -585,6 +656,7 @@ class SystemPartViewer(Frame):
             self.repository = None
             self._clear_tree()
             self.status_var.set("未配置系统料号文件")
+            self._notify_repository_update()
             return
         try:
             self.repository = SystemPartRepository(new_path)
@@ -593,14 +665,17 @@ class SystemPartViewer(Frame):
             self._clear_tree()
             self.status_var.set(str(exc))
             messagebox.showerror("加载失败", str(exc))
+            self._notify_repository_update()
             return
         except Exception as exc:  # pragma: no cover - user feedback
             self.repository = None
             self._clear_tree()
             self.status_var.set(f"读取失败：{exc}")
             messagebox.showerror("加载失败", f"读取系统料号失败：{exc}")
+            self._notify_repository_update()
             return
         self._refresh_tree()
+        self._notify_repository_update()
 
     def _build_ui(self) -> None:
         main_frame = Frame(self)
@@ -719,6 +794,7 @@ class SystemPartViewer(Frame):
     def _load_data(self, show_message: bool = False) -> None:
         if not self.path:
             self.status_var.set("未配置系统料号文件")
+            self._notify_repository_update()
             return
         try:
             self.repository = SystemPartRepository(self.path)
@@ -727,16 +803,23 @@ class SystemPartViewer(Frame):
             self._clear_tree()
             self.status_var.set(str(exc))
             messagebox.showerror("加载失败", str(exc))
+            self._notify_repository_update()
             return
         except Exception as exc:  # pragma: no cover - user feedback
             self.repository = None
             self._clear_tree()
             self.status_var.set(f"读取失败：{exc}")
             messagebox.showerror("加载失败", f"读取系统料号失败：{exc}")
+            self._notify_repository_update()
             return
         self._refresh_tree()
         if show_message:
             messagebox.showinfo("完成", "系统料号已重新加载。")
+        self._notify_repository_update()
+
+    def _notify_repository_update(self) -> None:
+        if self.on_repository_update:
+            self.on_repository_update(self.repository)
 
     def _refresh_tree(self) -> None:
         if not self.repository:
@@ -921,6 +1004,359 @@ class SystemPartViewer(Frame):
         self.status_var.set(f"已复制 {len(lines)} 条记录。")
 
 
+@dataclass
+class InvalidPartEntry:
+    invalid_part: str = ""
+    invalid_desc: str = ""
+    replacement_part: str = ""
+    replacement_desc: str = ""
+
+
+class InvalidPartEditor:
+    def __init__(
+        self,
+        master,
+        path: Path,
+        *,
+        part_lookup: Callable[[str], str] | None = None,
+    ) -> None:
+        self.path = path
+        self.part_lookup = part_lookup
+        self.entries: list[InvalidPartEntry] = []
+        self.selected_index: int | None = None
+        self._suspend_events = False
+        self.top = Toplevel(master)
+        self.top.title("失效料号库编辑")
+        self._build_ui()
+        self._load_entries()
+
+    def _build_ui(self) -> None:
+        path_frame = Frame(self.top)
+        path_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
+        Label(path_frame, text="文件路径：").pack(side=LEFT)
+        self.path_label = Label(path_frame, text=str(self.path), anchor="w")
+        self.path_label.pack(side=LEFT, fill=BOTH, expand=True)
+
+        tree_frame = Frame(self.top)
+        tree_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        scrollbar = Scrollbar(tree_frame)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        columns = ("invalid_part", "invalid_desc", "replacement_part", "replacement_desc")
+        self.tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            height=12,
+        )
+        headings = {
+            "invalid_part": "失效料号",
+            "invalid_desc": "失效描述",
+            "replacement_part": "替换料号",
+            "replacement_desc": "替换描述",
+        }
+        for key, title in headings.items():
+            self.tree.heading(key, text=title)
+            width = 140 if key.endswith("part") else 260
+            self.tree.column(key, width=width, anchor="w", stretch=True)
+        self.tree.pack(side=LEFT, fill=BOTH, expand=True)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.config(command=self.tree.yview)
+        self.tree.bind("<<TreeviewSelect>>", lambda _event: self._on_tree_select())
+        self.tree.bind("<Control-v>", self._handle_paste_shortcut)
+        self.tree.bind("<Command-v>", self._handle_paste_shortcut)
+
+        action_frame = Frame(self.top)
+        action_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
+        Button(action_frame, text="新增", command=self._add_entry).pack(side=LEFT)
+        Button(action_frame, text="删除", command=self._delete_entry).pack(side=LEFT, padx=5)
+        Button(action_frame, text="粘贴", command=self._paste_entries).pack(side=LEFT)
+
+        detail_frame = Frame(self.top)
+        detail_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
+        Label(detail_frame, text="失效料号：").grid(row=0, column=0, sticky="w")
+        self.invalid_part_var = StringVar()
+        Entry(detail_frame, textvariable=self.invalid_part_var).grid(row=0, column=1, sticky="ew")
+        Label(detail_frame, text="失效描述：").grid(row=1, column=0, sticky="w")
+        self.invalid_desc_var = StringVar()
+        Entry(detail_frame, textvariable=self.invalid_desc_var).grid(row=1, column=1, sticky="ew")
+        Label(detail_frame, text="替换料号：").grid(row=2, column=0, sticky="w")
+        self.replacement_part_var = StringVar()
+        Entry(detail_frame, textvariable=self.replacement_part_var).grid(row=2, column=1, sticky="ew")
+        Label(detail_frame, text="替换描述：").grid(row=3, column=0, sticky="w")
+        self.replacement_desc_var = StringVar()
+        Entry(detail_frame, textvariable=self.replacement_desc_var).grid(row=3, column=1, sticky="ew")
+        detail_frame.columnconfigure(1, weight=1)
+        self.invalid_part_var.trace_add("write", self._on_invalid_part_change)
+        self.invalid_desc_var.trace_add("write", self._on_invalid_desc_edit)
+        self.replacement_part_var.trace_add("write", self._on_replacement_part_change)
+        self.replacement_desc_var.trace_add("write", self._on_replacement_desc_edit)
+
+        button_frame = Frame(self.top)
+        button_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
+        Button(button_frame, text="保存", command=self._save_entries).pack(side=LEFT)
+        Button(button_frame, text="重新载入", command=self._reload_entries).pack(side=LEFT, padx=5)
+        Button(button_frame, text="关闭", command=self.top.destroy).pack(side=RIGHT)
+
+    def _handle_paste_shortcut(self, _event) -> str:
+        self._paste_entries()
+        return "break"
+
+    def _on_invalid_part_change(self, *_args) -> None:
+        if self._suspend_events:
+            return
+        self._auto_fill_invalid_desc()
+        self._commit_current_entry()
+
+    def _on_invalid_desc_edit(self, *_args) -> None:
+        if self._suspend_events:
+            return
+        self._commit_current_entry()
+
+    def _auto_fill_invalid_desc(self) -> None:
+        self._auto_fill_description(self.invalid_part_var, self.invalid_desc_var)
+
+    def _on_replacement_part_change(self, *_args) -> None:
+        if self._suspend_events:
+            return
+        self._auto_fill_replacement_desc()
+        self._commit_current_entry()
+
+    def _on_replacement_desc_edit(self, *_args) -> None:
+        if self._suspend_events:
+            return
+        self._commit_current_entry()
+
+    def _auto_fill_replacement_desc(self) -> None:
+        self._auto_fill_description(
+            self.replacement_part_var, self.replacement_desc_var
+        )
+
+    def _auto_fill_description(
+        self, part_var: StringVar, desc_var: StringVar
+    ) -> None:
+        if not self.part_lookup:
+            return
+        part_no = part_var.get().strip()
+        if not part_no:
+            return
+        desc = self.part_lookup(part_no)
+        if not desc:
+            return
+        self._suspend_events = True
+        desc_var.set(desc)
+        self._suspend_events = False
+
+    def _load_entries(self) -> None:
+        self.entries = []
+        try:
+            if self.path.exists():
+                workbook = load_workbook(self.path, data_only=True)
+                sheet = workbook.active
+                for row in sheet.iter_rows(min_row=2, values_only=True):
+                    if not row:
+                        continue
+                    invalid_part = str(row[0]).strip() if row[0] else ""
+                    invalid_desc = str(row[1]).strip() if len(row) > 1 and row[1] else ""
+                    replacement_part = str(row[2]).strip() if len(row) > 2 and row[2] else ""
+                    replacement_desc = str(row[3]).strip() if len(row) > 3 and row[3] else ""
+                    if not invalid_part and not replacement_part and not invalid_desc and not replacement_desc:
+                        continue
+                    self.entries.append(
+                        InvalidPartEntry(
+                            invalid_part=invalid_part,
+                            invalid_desc=invalid_desc,
+                            replacement_part=replacement_part,
+                            replacement_desc=replacement_desc,
+                        )
+                    )
+                workbook.close()
+        except Exception as exc:
+            messagebox.showerror("加载失败", f"读取失效料号失败：{exc}")
+            self.entries = []
+        self._refresh_tree()
+        if self.entries:
+            self._select_index(0)
+        else:
+            self._clear_entry_fields()
+
+    def _refresh_tree(self) -> None:
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for idx, entry in enumerate(self.entries):
+            values = (
+                entry.invalid_part,
+                entry.invalid_desc,
+                entry.replacement_part,
+                entry.replacement_desc,
+            )
+            self.tree.insert("", "end", iid=str(idx), values=values)
+        self.tree.update_idletasks()
+
+    def _on_tree_select(self) -> None:
+        if self.selected_index is not None:
+            self._commit_current_entry()
+        selection = self.tree.selection()
+        if not selection:
+            self.selected_index = None
+            self._clear_entry_fields()
+            return
+        index = int(selection[0])
+        if index >= len(self.entries):
+            self.selected_index = None
+            self._clear_entry_fields()
+            return
+        self.selected_index = index
+        entry = self.entries[index]
+        self._suspend_events = True
+        self.invalid_part_var.set(entry.invalid_part)
+        self.invalid_desc_var.set(entry.invalid_desc)
+        self.replacement_part_var.set(entry.replacement_part)
+        self.replacement_desc_var.set(entry.replacement_desc)
+        self._suspend_events = False
+        if entry.invalid_part and not entry.invalid_desc:
+            self._auto_fill_invalid_desc()
+        if entry.replacement_part and not entry.replacement_desc:
+            self._auto_fill_replacement_desc()
+        self._commit_current_entry()
+
+    def _clear_entry_fields(self) -> None:
+        self._suspend_events = True
+        self.invalid_part_var.set("")
+        self.invalid_desc_var.set("")
+        self.replacement_part_var.set("")
+        self.replacement_desc_var.set("")
+        self._suspend_events = False
+
+    def _commit_current_entry(self) -> None:
+        if self.selected_index is None:
+            return
+        if not (0 <= self.selected_index < len(self.entries)):
+            return
+        entry = self.entries[self.selected_index]
+        entry.invalid_part = self.invalid_part_var.get().strip()
+        entry.invalid_desc = self.invalid_desc_var.get().strip()
+        entry.replacement_part = self.replacement_part_var.get().strip()
+        entry.replacement_desc = self.replacement_desc_var.get().strip()
+        self._update_tree_item(self.selected_index, entry)
+
+    def _update_tree_item(self, index: int, entry: InvalidPartEntry) -> None:
+        item_id = str(index)
+        if item_id in self.tree.get_children():
+            self.tree.item(
+                item_id,
+                values=(
+                    entry.invalid_part,
+                    entry.invalid_desc,
+                    entry.replacement_part,
+                    entry.replacement_desc,
+                ),
+            )
+
+    def _add_entry(self) -> None:
+        self._commit_current_entry()
+        self.entries.append(InvalidPartEntry())
+        self._refresh_tree()
+        self._select_index(len(self.entries) - 1)
+
+    def _delete_entry(self) -> None:
+        if self.selected_index is None:
+            return
+        if not (0 <= self.selected_index < len(self.entries)):
+            return
+        del self.entries[self.selected_index]
+        self._refresh_tree()
+        if self.entries:
+            self._select_index(min(self.selected_index, len(self.entries) - 1))
+        else:
+            self.selected_index = None
+            self._clear_entry_fields()
+
+    def _paste_entries(self) -> None:
+        self._commit_current_entry()
+        try:
+            raw_text = self.top.clipboard_get()
+        except Exception as exc:
+            messagebox.showerror("粘贴失败", f"无法读取剪贴板：{exc}")
+            return
+        rows: list[InvalidPartEntry] = []
+        for line in raw_text.splitlines():
+            cells = [cell.strip() for cell in line.split("\t")]
+            if not any(cells):
+                continue
+            invalid_part = cells[0] if len(cells) > 0 else ""
+            invalid_desc = cells[1] if len(cells) > 1 else ""
+            replacement_part = cells[2] if len(cells) > 2 else ""
+            replacement_desc = cells[3] if len(cells) > 3 else ""
+            entry = InvalidPartEntry(
+                invalid_part=invalid_part,
+                invalid_desc=invalid_desc,
+                replacement_part=replacement_part,
+                replacement_desc=replacement_desc,
+            )
+            if self.part_lookup and entry.invalid_part and not entry.invalid_desc:
+                desc = self.part_lookup(entry.invalid_part)
+                if desc:
+                    entry.invalid_desc = desc
+            if self.part_lookup and entry.replacement_part and not entry.replacement_desc:
+                desc = self.part_lookup(entry.replacement_part)
+                if desc:
+                    entry.replacement_desc = desc
+            rows.append(entry)
+        if not rows:
+            return
+        self.entries.extend(rows)
+        self._refresh_tree()
+        self._select_index(len(self.entries) - len(rows))
+
+    def _select_index(self, index: int) -> None:
+        if not self.entries:
+            self.selected_index = None
+            self._clear_entry_fields()
+            return
+        index = max(0, min(index, len(self.entries) - 1))
+        item_id = str(index)
+        self.tree.selection_set(item_id)
+        self.tree.focus(item_id)
+        self.tree.see(item_id)
+        self._on_tree_select()
+
+    def _save_entries(self) -> None:
+        self._commit_current_entry()
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror("保存失败", f"创建目录失败：{exc}")
+            return
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "失效料号"
+        sheet.append(["失效料号", "失效描述", "替换料号", "替换描述"])
+        for entry in self.entries:
+            if not any([entry.invalid_part, entry.invalid_desc, entry.replacement_part, entry.replacement_desc]):
+                continue
+            sheet.append(
+                [
+                    entry.invalid_part,
+                    entry.invalid_desc,
+                    entry.replacement_part,
+                    entry.replacement_desc,
+                ]
+            )
+        try:
+            workbook.save(self.path)
+        except Exception as exc:
+            messagebox.showerror("保存失败", f"写入失效料号失败：{exc}")
+            return
+        finally:
+            workbook.close()
+        messagebox.showinfo("保存成功", f"已保存到：{self.path}")
+
+    def _reload_entries(self) -> None:
+        self._load_entries()
+        messagebox.showinfo("完成", "失效料号已重新加载。")
+
+
 class BlockedApplicantEditor:
     def __init__(
         self,
@@ -996,8 +1432,15 @@ class BlockedApplicantEditor:
 class BindingEditor:
     CONDITION_MODE_OPTIONS = ("", "ALL", "ANY", "NOTANY")
 
-    def __init__(self, master, binding_library: BindingLibrary):
+    def __init__(
+        self,
+        master,
+        binding_library: BindingLibrary,
+        *,
+        part_lookup: Callable[[str], str] | None = None,
+    ):
         self.binding_library = binding_library
+        self.part_lookup = part_lookup
         self.top = Toplevel(master)
         self.top.title("绑定料号编辑")
         self.projects: list[BindingProject] = []
@@ -1006,6 +1449,7 @@ class BindingEditor:
         self.selected_choice_index: int | None = None
         self.project_clipboard: BindingProject | None = None
         self.group_clipboard: BindingGroup | None = None
+        self._suspend_part_lookup = False
         self._build_ui()
         self._load_data()
 
@@ -1055,6 +1499,8 @@ class BindingEditor:
         Label(basic_frame, text="索引描述：").grid(row=2, column=0, sticky="w")
         self.project_index_desc_var = StringVar()
         Entry(basic_frame, textvariable=self.project_index_desc_var).grid(row=2, column=1, sticky="ew")
+        self.project_index_var.trace_add("write", self._on_project_index_change)
+        self.project_index_desc_var.trace_add("write", self._on_project_index_desc_edit)
         basic_frame.columnconfigure(1, weight=1)
 
         # Groups
@@ -1122,6 +1568,8 @@ class BindingEditor:
         Label(choice_edit, text="描述：").grid(row=1, column=0, sticky="w")
         self.choice_desc_var = StringVar()
         Entry(choice_edit, textvariable=self.choice_desc_var).grid(row=1, column=1, sticky="ew")
+        self.choice_part_var.trace_add("write", self._on_choice_part_change)
+        self.choice_desc_var.trace_add("write", self._on_choice_desc_edit)
         Label(choice_edit, text="条件模式：").grid(row=2, column=0, sticky="w")
         self.choice_mode_var = StringVar()
         self.choice_mode_combo = ttk.Combobox(
@@ -1156,6 +1604,52 @@ class BindingEditor:
         Button(button_frame, text="导入Excel", command=self._import_excel).pack(side=LEFT, padx=5)
         Button(button_frame, text="导出Excel", command=self._export_excel).pack(side=LEFT, padx=5)
 
+    def _on_project_index_change(self, *_args) -> None:
+        if self._suspend_part_lookup:
+            return
+        self._auto_fill_project_index_desc()
+
+    def _on_project_index_desc_edit(self, *_args) -> None:
+        if self._suspend_part_lookup:
+            return
+
+    def _auto_fill_project_index_desc(self) -> None:
+        if not self.part_lookup:
+            return
+        part_no = self.project_index_var.get().strip()
+        if not part_no:
+            return
+        desc = self.part_lookup(part_no)
+        if not desc:
+            return
+        self._suspend_part_lookup = True
+        self.project_index_desc_var.set(desc)
+        self._suspend_part_lookup = False
+        self._commit_project_fields()
+
+    def _on_choice_part_change(self, *_args) -> None:
+        if self._suspend_part_lookup:
+            return
+        self._auto_fill_choice_desc()
+
+    def _on_choice_desc_edit(self, *_args) -> None:
+        if self._suspend_part_lookup:
+            return
+
+    def _auto_fill_choice_desc(self) -> None:
+        if not self.part_lookup:
+            return
+        part_no = self.choice_part_var.get().strip()
+        if not part_no:
+            return
+        desc = self.part_lookup(part_no)
+        if not desc:
+            return
+        self._suspend_part_lookup = True
+        self.choice_desc_var.set(desc)
+        self._suspend_part_lookup = False
+        self._commit_choice_fields()
+
     def _load_data(self) -> None:
         self.binding_library.load()
         self.projects = [BindingProject.from_dict(project.to_dict()) for project in self.binding_library.iter_projects()]
@@ -1180,6 +1674,7 @@ class BindingEditor:
             self.project_list.see(index)
 
     def _clear_project_fields(self) -> None:
+        self._suspend_part_lookup = True
         self.project_desc_var.set("")
         self.project_index_var.set("")
         self.project_index_desc_var.set("")
@@ -1193,6 +1688,7 @@ class BindingEditor:
         self.choice_mode_var.set("")
         self.choice_condition_var.set("")
         self.choice_number_var.set("")
+        self._suspend_part_lookup = False
 
     def _on_project_select(self) -> None:
         selection = self.project_list.curselection()
@@ -1207,9 +1703,13 @@ class BindingEditor:
         self.selected_project_index = selection[0]
         self._ensure_project_visible(self.selected_project_index)
         project = self.projects[self.selected_project_index]
+        self._suspend_part_lookup = True
         self.project_desc_var.set(project.project_desc)
         self.project_index_var.set(project.index_part_no)
         self.project_index_desc_var.set(project.index_part_desc)
+        self._suspend_part_lookup = False
+        if project.index_part_no and not self.project_index_desc_var.get().strip():
+            self._auto_fill_project_index_desc()
         self._refresh_group_list()
 
     def _commit_project_fields(self) -> None:
@@ -1319,6 +1819,7 @@ class BindingEditor:
     def _clear_choice_fields(self) -> None:
         self.choice_tree.selection_remove(self.choice_tree.selection())
         self.choice_tree.focus("")
+        self._suspend_part_lookup = True
         self.choice_part_var.set("")
         self.choice_desc_var.set("")
         self.choice_mode_combo.configure(values=self.CONDITION_MODE_OPTIONS)
@@ -1326,6 +1827,7 @@ class BindingEditor:
         self.choice_condition_var.set("")
         self.choice_number_var.set("")
         self.selected_choice_index = None
+        self._suspend_part_lookup = False
 
     def _on_choice_select(self) -> None:
         selection = self.choice_tree.selection()
@@ -1339,8 +1841,12 @@ class BindingEditor:
         choice = self.projects[self.selected_project_index].required_groups[self.selected_group_index].choices[
             self.selected_choice_index
         ]
+        self._suspend_part_lookup = True
         self.choice_part_var.set(choice.part_no)
         self.choice_desc_var.set(choice.desc)
+        self._suspend_part_lookup = False
+        if choice.part_no and not self.choice_desc_var.get().strip():
+            self._auto_fill_choice_desc()
         self._set_choice_mode_value(choice.condition_mode or "")
         self.choice_condition_var.set(",".join(choice.condition_part_nos))
         self.choice_number_var.set("" if choice.number is None else str(choice.number))

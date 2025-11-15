@@ -32,6 +32,19 @@ pip install -r requirements.txt
 3. 在界面中选择需要处理的 BOM Excel，点击“执行”。
 4. 如需维护绑定料号库，点击“编辑绑定料号”进行增删改或导入导出。
 
+## 生成 Windows 可执行文件
+
+如需在 Windows 上运行免安装版本，可使用 PyInstaller 打包。由于 PyInstaller 不支持跨平台打包，以下步骤需在 Windows 环境执行：
+
+1. 安装 [Python 3.10+](https://www.python.org/downloads/windows/) 并确保已勾选 “Add python.exe to PATH”。
+2. 克隆或下载本仓库，解压到本地目录（路径建议避免中文和空格）。
+3. 在命令提示字元中切换到仓库根目录后执行：
+   ```bat
+   scripts\build_windows_exe.bat
+   ```
+   该脚本会自动创建虚拟环境、安装依赖并调用 PyInstaller。
+4. 打包完成后，可在 `dist\bomcheck\bomcheck.exe` 找到可执行文件。请将 `dist\bomcheck` 整个目录与配置/数据文件一同分发，或在运行后根据需要替换其中的配置和资料。
+
 ## 配置
 
 `config.json` 用于定义数据库文件路径，默认为仓库根目录同名文件，如需自定义可修改该文件。
