@@ -29,6 +29,11 @@ from bomcheck_app.binding_library import BindingChoice, BindingGroup, BindingLib
 from bomcheck_app.config import AppConfig, load_config, save_config
 from bomcheck_app.excel_processor import ExcelProcessor, SaveWorkbookError, format_quantity_text
 from bomcheck_app.models import ExecutionResult
+from bomcheck_app.system_parts import (
+    SystemPartRecord,
+    SystemPartRepository,
+    generate_system_part_excel,
+)
 
 CONFIG_PATH = Path("config.json")
 
@@ -38,6 +43,10 @@ class Application:
         self.root = root
         self.root.title("料号检测系统")
         self.config_path: Path = CONFIG_PATH
+        self.system_part_path: Path | None = None
+        self.blocked_applicant_path: Path | None = None
+        self.system_part_viewer: SystemPartViewer | None = None
+        self.blocked_editor: BlockedApplicantEditor | None = None
         self._apply_config(self.config_path)
         self.selected_file: Path | None = None
         self._execution_lock = threading.Lock()
@@ -73,6 +82,12 @@ class Application:
         Button(action_frame, text="编辑重要物料", command=self._open_important_material_editor).pack(
             side=LEFT, padx=5
         )
+        Button(action_frame, text="系统料号查询", command=self._open_system_part_viewer).pack(
+            side=LEFT, padx=5
+        )
+        Button(action_frame, text="编辑屏蔽申请人", command=self._open_blocked_applicant_editor).pack(
+            side=LEFT, padx=5
+        )
 
         result_frame = Frame(self.root)
         result_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
@@ -96,6 +111,12 @@ class Application:
         self.config = config
         self.binding_library = binding_library
         self.processor = processor
+        self.system_part_path = config.system_part_db
+        self.blocked_applicant_path = config.blocked_applicants
+        if self.system_part_viewer is not None:
+            self.system_part_viewer.update_path(config.system_part_db)
+        if self.blocked_editor is not None:
+            self.blocked_editor.update_path(config.blocked_applicants)
         self._refresh_config_entry()
 
     def _refresh_config_entry(self) -> None:
@@ -218,6 +239,31 @@ class Application:
     def _open_important_material_editor(self) -> None:
         ImportantMaterialEditor(self.root, self.config.important_materials)
 
+    def _open_system_part_viewer(self) -> None:
+        if not self.system_part_path:
+            messagebox.showerror("缺少配置", "请先在数据文件设置中配置系统料号文件。")
+            return
+        try:
+            self.system_part_viewer = SystemPartViewer(
+                self.root,
+                self.system_part_path,
+                on_close=lambda: setattr(self, "system_part_viewer", None),
+            )
+        except FileNotFoundError as exc:
+            messagebox.showerror("加载失败", str(exc))
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("加载失败", f"打开系统料号失败：{exc}")
+
+    def _open_blocked_applicant_editor(self) -> None:
+        if not self.blocked_applicant_path:
+            messagebox.showerror("缺少配置", "请先在数据文件设置中配置屏蔽申请人列表。")
+            return
+        self.blocked_editor = BlockedApplicantEditor(
+            self.root,
+            self.blocked_applicant_path,
+            on_close=lambda: setattr(self, "blocked_editor", None),
+        )
+
     def _build_summary_lines(self, result: ExecutionResult) -> list[str]:
         lines = [
             f"失效料号数量：{format_quantity_text(result.replacement_summary.total_invalid_found)}",
@@ -333,6 +379,8 @@ class DataFileEditor:
         self.invalid_var = StringVar(value=str(config.invalid_part_db))
         self.binding_var = StringVar(value=str(config.binding_library))
         self.important_var = StringVar(value=str(config.important_materials))
+        self.system_part_var = StringVar(value=str(config.system_part_db))
+        self.blocked_var = StringVar(value=str(config.blocked_applicants))
 
         self._build_ui()
 
@@ -359,6 +407,28 @@ class DataFileEditor:
             row=2,
             label_text="重要物料清单：",
             text_var=self.important_var,
+            filetypes=[("文本", "*.txt"), ("所有文件", "*.*")],
+        )
+        Label(frame, text="系统料号文件：").grid(row=3, column=0, sticky="w", pady=5)
+        Entry(frame, textvariable=self.system_part_var, width=50).grid(
+            row=3, column=1, padx=5, sticky="ew"
+        )
+        Button(
+            frame,
+            text="浏览",
+            command=lambda: self._choose_file(
+                self.system_part_var,
+                [("系统料号", "*.tsv *.xlsx *.xlsm"), ("所有文件", "*.*")],
+            ),
+        ).grid(row=3, column=2)
+        Button(frame, text="执行", command=self._process_system_parts).grid(
+            row=4, column=1, sticky="w", pady=(0, 5)
+        )
+        self._build_file_selector(
+            frame,
+            row=5,
+            label_text="屏蔽申请人列表：",
+            text_var=self.blocked_var,
             filetypes=[("文本", "*.txt"), ("所有文件", "*.*")],
         )
 
@@ -397,6 +467,8 @@ class DataFileEditor:
         invalid_path = self.invalid_var.get().strip()
         binding_path = self.binding_var.get().strip()
         important_path = self.important_var.get().strip()
+        system_part_path = self.system_part_var.get().strip()
+        blocked_path = self.blocked_var.get().strip()
 
         if not invalid_path or not binding_path:
             messagebox.showerror("保存失败", "请完整填写数据库文件路径。")
@@ -404,11 +476,19 @@ class DataFileEditor:
         if not important_path:
             messagebox.showerror("保存失败", "请填写重要物料清单路径。")
             return
+        if not system_part_path:
+            messagebox.showerror("保存失败", "请填写系统料号文件路径。")
+            return
+        if not blocked_path:
+            messagebox.showerror("保存失败", "请填写屏蔽申请人列表路径。")
+            return
 
         new_config = AppConfig(
             invalid_part_db=self._normalize_path(invalid_path),
             binding_library=self._normalize_path(binding_path),
             important_materials=self._normalize_path(important_path),
+            system_part_db=self._normalize_path(system_part_path),
+            blocked_applicants=self._normalize_path(blocked_path),
         )
 
         try:
@@ -419,12 +499,286 @@ class DataFileEditor:
 
         self.top.destroy()
 
+    def _process_system_parts(self) -> None:
+        source_path = self.system_part_var.get().strip()
+        if not source_path:
+            messagebox.showerror("处理失败", "请先选择系统料号原始文件。")
+            return
+
+        invalid_path = self.invalid_var.get().strip()
+        blocked_path = self.blocked_var.get().strip()
+        if not invalid_path:
+            messagebox.showerror("处理失败", "请先设置失效料号数据库路径。")
+            return
+        if not blocked_path:
+            messagebox.showerror("处理失败", "请先设置屏蔽申请人列表路径。")
+            return
+
+        try:
+            source = self._normalize_path(source_path)
+            invalid = self._normalize_path(invalid_path)
+            blocked = self._normalize_path(blocked_path)
+        except Exception as exc:  # pragma: no cover - defensive
+            messagebox.showerror("处理失败", f"路径解析失败：{exc}")
+            return
+
+        if not source.exists():
+            messagebox.showerror("处理失败", f"未找到系统料号原始文件：{source}")
+            return
+        if not invalid.exists():
+            messagebox.showerror("处理失败", f"未找到失效料号数据库：{invalid}")
+            return
+        blocked.parent.mkdir(parents=True, exist_ok=True)
+        if not blocked.exists():
+            blocked.touch()
+
+        try:
+            output_path = generate_system_part_excel(source, invalid, blocked)
+        except Exception as exc:
+            messagebox.showerror("处理失败", f"系统料号处理失败：{exc}")
+            return
+
+        self.system_part_var.set(str(output_path))
+        messagebox.showinfo("完成", f"系统料号Excel已生成：{output_path}")
+
     def _normalize_path(self, raw_path: str) -> Path:
         path = Path(raw_path)
         if not path.is_absolute():
             path = self.base_dir / path
         return path
 
+
+class SystemPartViewer:
+    def __init__(
+        self,
+        master,
+        path: Path,
+        *,
+        on_close: Callable[[], None] | None = None,
+    ) -> None:
+        self.master = master
+        self.path = path
+        self.on_close = on_close
+        self.repository: SystemPartRepository | None = None
+        self.top = Toplevel(master)
+        self.top.title("系统料号查询")
+        self.top.transient(master)
+        self.search_var = StringVar()
+        self.status_var = StringVar()
+        self._build_ui()
+        self.update_path(path)
+        self._load_data()
+        self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
+
+    def update_path(self, new_path: Path) -> None:
+        self.path = new_path
+        if hasattr(self, "path_label"):
+            self.path_label.config(text=str(new_path))
+        if self.repository is not None:
+            try:
+                self.repository = SystemPartRepository(new_path)
+            except FileNotFoundError as exc:
+                messagebox.showerror("加载失败", str(exc))
+                return
+            except Exception as exc:  # pragma: no cover - user feedback
+                messagebox.showerror("加载失败", f"读取系统料号失败：{exc}")
+                return
+            self._refresh_tree()
+
+    def _build_ui(self) -> None:
+        main_frame = Frame(self.top)
+        main_frame.pack(fill=BOTH, expand=True)
+
+        path_frame = Frame(main_frame)
+        path_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
+        Label(path_frame, text="文件路径：").pack(side=LEFT)
+        self.path_label = Label(path_frame, text=str(self.path), anchor="w")
+        self.path_label.pack(side=LEFT, fill=BOTH, expand=True)
+        Button(path_frame, text="重新加载", command=lambda: self._load_data(show_message=True)).pack(
+            side=LEFT, padx=5
+        )
+
+        search_frame = Frame(main_frame)
+        search_frame.pack(fill=BOTH, padx=10, pady=(5, 0))
+        Label(search_frame, text="查询：").pack(side=LEFT)
+        search_entry = Entry(search_frame, textvariable=self.search_var)
+        search_entry.pack(side=LEFT, fill=BOTH, expand=True)
+        search_entry.bind("<Return>", lambda _event: self._perform_search())
+        Button(search_frame, text="查找", command=self._perform_search).pack(side=LEFT, padx=5)
+        Button(search_frame, text="清除", command=self._clear_search).pack(side=LEFT)
+
+        tree_frame = Frame(main_frame)
+        tree_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        scrollbar = Scrollbar(tree_frame)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        self.tree = ttk.Treeview(
+            tree_frame,
+            columns=("description", "unit", "applicant", "inventory"),
+            show="tree headings",
+        )
+        self.tree.pack(side=LEFT, fill=BOTH, expand=True)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.config(command=self.tree.yview)
+        self.tree.heading("#0", text="分类 / 料号", anchor="w")
+        self.tree.heading("description", text="描述", anchor="w")
+        self.tree.heading("unit", text="单位", anchor="w")
+        self.tree.heading("applicant", text="申请人", anchor="w")
+        self.tree.heading("inventory", text="库存", anchor="w")
+        self.tree.column("#0", width=220, minwidth=150, anchor="w")
+        self.tree.column("description", width=400, minwidth=200, anchor="w")
+        self.tree.column("unit", width=80, anchor="w")
+        self.tree.column("applicant", width=160, minwidth=120, anchor="w")
+        self.tree.column("inventory", width=80, anchor="e")
+
+        status_frame = Frame(main_frame)
+        status_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
+        Label(status_frame, textvariable=self.status_var, anchor="w").pack(
+            side=LEFT, fill=BOTH, expand=True
+        )
+
+    def _perform_search(self) -> None:
+        self._refresh_tree()
+
+    def _clear_search(self) -> None:
+        self.search_var.set("")
+        self._refresh_tree()
+
+    def _load_data(self, show_message: bool = False) -> None:
+        try:
+            self.repository = SystemPartRepository(self.path)
+        except FileNotFoundError as exc:
+            messagebox.showerror("加载失败", str(exc))
+            return
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("加载失败", f"读取系统料号失败：{exc}")
+            return
+        self._refresh_tree()
+        if show_message:
+            messagebox.showinfo("完成", "系统料号已重新加载。")
+
+    def _refresh_tree(self) -> None:
+        if not self.repository:
+            return
+        query = self.search_var.get().strip()
+        hierarchy = self.repository.build_hierarchy(query or None)
+        for item in self.tree.get_children(""):
+            self.tree.delete(item)
+        self._insert_nodes("", hierarchy)
+        total = len(self.repository.records)
+        if query:
+            matched = len(self.repository.search(query))
+            self.status_var.set(f"共 {total} 条，匹配 {matched} 条")
+            self._expand_all()
+        else:
+            self.status_var.set(f"共 {total} 条")
+
+    def _insert_nodes(self, parent: str, node: Dict[str, Dict]) -> None:
+        for category in sorted(node.get("children", {})):
+            child = node["children"][category]
+            item_id = self.tree.insert(parent, "end", text=category, values=("", "", "", ""))
+            self._insert_nodes(item_id, child)
+        for record in node.get("parts", []):
+            self._insert_part(parent, record)
+
+    def _insert_part(self, parent: str, record: SystemPartRecord) -> None:
+        self.tree.insert(
+            parent,
+            "end",
+            text=record.part_no,
+            values=(
+                record.description,
+                record.unit,
+                record.applicant,
+                record.inventory_display,
+            ),
+        )
+
+    def _expand_all(self) -> None:
+        def expand(item: str) -> None:
+            self.tree.item(item, open=True)
+            for child in self.tree.get_children(item):
+                expand(child)
+
+        for item in self.tree.get_children(""):
+            expand(item)
+
+    def _handle_close(self) -> None:
+        if self.on_close:
+            self.on_close()
+        self.top.destroy()
+
+
+class BlockedApplicantEditor:
+    def __init__(
+        self,
+        master,
+        path: Path,
+        *,
+        on_close: Callable[[], None] | None = None,
+    ) -> None:
+        self.path = path
+        self.on_close = on_close
+        self.top = Toplevel(master)
+        self.top.title("屏蔽申请人编辑")
+        self._build_ui()
+        self.update_path(path)
+        self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
+
+    def update_path(self, new_path: Path) -> None:
+        self.path = new_path
+        if hasattr(self, "path_label"):
+            self.path_label.config(text=str(self.path))
+        self._load_content()
+
+    def _build_ui(self) -> None:
+        path_frame = Frame(self.top)
+        path_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
+        Label(path_frame, text="文件路径：").pack(side=LEFT)
+        self.path_label = Label(path_frame, text=str(self.path), anchor="w")
+        self.path_label.pack(side=LEFT, fill=BOTH, expand=True)
+        Button(path_frame, text="重新加载", command=self._load_content).pack(side=LEFT, padx=5)
+
+        text_frame = Frame(self.top)
+        text_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        scrollbar = Scrollbar(text_frame)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        self.text = Text(text_frame, wrap="none")
+        self.text.pack(side=LEFT, fill=BOTH, expand=True)
+        self.text.config(yscrollcommand=scrollbar.set)
+        scrollbar.config(command=self.text.yview)
+
+        button_frame = Frame(self.top)
+        button_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
+        Button(button_frame, text="保存", command=self._save_content).pack(side=LEFT)
+        Button(button_frame, text="关闭", command=self._handle_close).pack(side=RIGHT)
+
+    def _load_content(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if not self.path.exists():
+                self.path.touch()
+            content = self.path.read_text(encoding="utf-8")
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("加载失败", f"读取屏蔽申请人失败：{exc}")
+            content = ""
+        self.text.delete(1.0, END)
+        self.text.insert(END, content)
+
+    def _save_content(self) -> None:
+        content = self.text.get("1.0", END)
+        if content.endswith("\n"):
+            content = content[:-1]
+        try:
+            self.path.write_text(content, encoding="utf-8")
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("保存失败", f"写入屏蔽申请人失败：{exc}")
+        else:
+            messagebox.showinfo("保存成功", f"已保存到：{self.path}")
+
+    def _handle_close(self) -> None:
+        if self.on_close:
+            self.on_close()
+        self.top.destroy()
 
 class BindingEditor:
     CONDITION_MODE_OPTIONS = ("", "ALL", "ANY", "NOTANY")

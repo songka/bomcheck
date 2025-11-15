@@ -11,6 +11,8 @@ DEFAULT_CONFIG = {
     "invalid_part_db": "失效料号.xlsx",
     "binding_library": "绑定料号.js",
     "important_materials": "重要物料.txt",
+    "system_part_db": "系统料号.xlsx",
+    "blocked_applicants": "屏蔽申请人.txt",
 }
 
 
@@ -19,6 +21,8 @@ class AppConfig:
     invalid_part_db: Path
     binding_library: Path
     important_materials: Path
+    system_part_db: Path
+    blocked_applicants: Path
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], base_dir: Path) -> "AppConfig":
@@ -26,6 +30,8 @@ class AppConfig:
             invalid_part_db=_resolve_path(data.get("invalid_part_db"), base_dir),
             binding_library=_resolve_path(data.get("binding_library"), base_dir),
             important_materials=_resolve_path(data.get("important_materials"), base_dir),
+            system_part_db=_resolve_path(data.get("system_part_db"), base_dir),
+            blocked_applicants=_resolve_path(data.get("blocked_applicants"), base_dir),
         )
 
     def to_dict(self, base_dir: Path) -> Dict[str, str]:
@@ -33,6 +39,8 @@ class AppConfig:
             "invalid_part_db": _to_relative(self.invalid_part_db, base_dir),
             "binding_library": _to_relative(self.binding_library, base_dir),
             "important_materials": _to_relative(self.important_materials, base_dir),
+            "system_part_db": _to_relative(self.system_part_db, base_dir),
+            "blocked_applicants": _to_relative(self.blocked_applicants, base_dir),
         }
 
 
