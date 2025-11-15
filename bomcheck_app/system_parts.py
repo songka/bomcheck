@@ -10,6 +10,7 @@ from typing import Dict
 from openpyxl import Workbook, load_workbook
 
 from .excel_processor import format_quantity_text, normalize_part_no
+from .text_utils import normalized_variants
 
 
 @dataclass
@@ -64,11 +65,11 @@ class SystemPartRepository:
         self.records = records
 
     def build_hierarchy(self, query: str | None = None) -> Dict[str, Dict]:
-        normalized_query = query.lower() if query else ""
+        keywords = _prepare_keywords(query)
         root: Dict[str, Dict] = {"children": {}, "parts": []}
 
         for record in self.records:
-            if normalized_query and not _matches_query(record, normalized_query):
+            if keywords and not _matches_query(record, keywords):
                 continue
             node = root
             for category in record.categories:
@@ -78,8 +79,10 @@ class SystemPartRepository:
         return root
 
     def search(self, query: str) -> list[SystemPartRecord]:
-        normalized_query = query.lower()
-        return [record for record in self.records if _matches_query(record, normalized_query)]
+        keywords = _prepare_keywords(query)
+        if not keywords:
+            return list(self.records)
+        return [record for record in self.records if _matches_query(record, keywords)]
 
 
 def generate_system_part_excel(
@@ -221,27 +224,30 @@ def _load_invalid_part_numbers(path: Path) -> set[str]:
     return invalid_numbers
 
 
-def _load_blocked_applicants(path: Path) -> set[str]:
+def _load_blocked_applicants(path: Path) -> "BlockedApplicantMatcher":
+    matcher = BlockedApplicantMatcher()
     if not path.exists():
-        return set()
+        return matcher
     content = path.read_text(encoding="utf-8")
     tokens = re.split(r"[\s,;，；]+", content)
-    return {token.strip().lower() for token in tokens if token.strip()}
+    for token in tokens:
+        matcher.add(token)
+    return matcher
 
 
-def _should_block(applicant: str, blocked: set[str]) -> bool:
-    if not applicant or not blocked:
+def _should_block(applicant: str, blocked: "BlockedApplicantMatcher") -> bool:
+    if not applicant:
         return False
-    tokens = re.split(r"[\s,;，；]+", applicant)
-    normalized = {token.strip().lower() for token in tokens if token.strip()}
-    return any(token in blocked for token in normalized)
+    return blocked.matches(applicant)
 
 
-def _matches_query(record: SystemPartRecord, normalized_query: str) -> bool:
-    text = "".join(
+def _matches_query(record: SystemPartRecord, keywords: list[str]) -> bool:
+    if not keywords:
+        return True
+    text = " ".join(
         [record.part_no.lower(), record.description.lower(), record.applicant.lower()]
     )
-    return normalized_query in text
+    return all(keyword in text for keyword in keywords)
 
 
 def _safe_str(value) -> str:
@@ -250,4 +256,54 @@ def _safe_str(value) -> str:
 
 def _clean_applicant_text(value: str) -> str:
     return value.strip().strip(",，;；")
+
+
+class BlockedApplicantMatcher:
+    def __init__(self) -> None:
+        self._variant_lengths: dict[str, set[int]] = {}
+
+    def add(self, value: str) -> None:
+        if value is None:
+            return
+        cleaned = value.strip()
+        if not cleaned:
+            return
+        length = len(cleaned)
+        for variant in normalized_variants(cleaned):
+            if not variant:
+                continue
+            self._variant_lengths.setdefault(variant, set()).add(length)
+
+    def matches(self, applicant: str) -> bool:
+        if not self._variant_lengths or not applicant:
+            return False
+        for token in _split_applicant_tokens(applicant):
+            token_length = len(token)
+            for variant in normalized_variants(token):
+                lengths = self._variant_lengths.get(variant)
+                if not lengths:
+                    continue
+                if token_length == 2:
+                    if 2 in lengths:
+                        return True
+                else:
+                    return True
+        return False
+
+
+def _split_applicant_tokens(value: str) -> list[str]:
+    raw_tokens = re.split(r"[\s,;，；/、\|]+", value)
+    tokens: list[str] = []
+    for token in raw_tokens:
+        cleaned = token.strip().strip("()（）[]【】'\"")
+        if cleaned:
+            tokens.append(cleaned)
+    return tokens
+
+
+def _prepare_keywords(query: str | None) -> list[str]:
+    if not query:
+        return []
+    tokens = [segment.strip().lower() for segment in re.split(r"[\s,;，；]+", query)]
+    return [token for token in tokens if token]
 
