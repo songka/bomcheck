@@ -75,7 +75,7 @@ def _is_black_fill(cell: Cell) -> bool:
         return False
     theme = getattr(color, "theme", None)
     tint = getattr(color, "tint", 0)
-    if theme in (0, 1) and (tint in (0, None) or abs(tint) < 1e-9):
+    if theme == 0 and (tint in (0, None) or abs(tint) < 1e-9):
         return True
     return False
 
