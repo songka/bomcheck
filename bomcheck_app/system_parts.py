@@ -39,6 +39,7 @@ class SystemPartRepository:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.records: list[SystemPartRecord] = []
+        self._index: dict[str, SystemPartRecord] = {}
         self.load()
 
     def load(self) -> None:
@@ -48,6 +49,7 @@ class SystemPartRepository:
         workbook = load_workbook(self.path, data_only=True, read_only=True)
         sheet = workbook.active
         records: list[SystemPartRecord] = []
+        index: dict[str, SystemPartRecord] = {}
         for row in sheet.iter_rows(min_row=2, values_only=True):
             if not row:
                 continue
@@ -59,10 +61,21 @@ class SystemPartRepository:
             if not part_no:
                 continue
             inventory = _convert_inventory(inventory_value)
-            records.append(SystemPartRecord(part_no, description, unit, applicant, inventory))
+            record = SystemPartRecord(part_no, description, unit, applicant, inventory)
+            records.append(record)
+            normalized = normalize_part_no(part_no)
+            if normalized and normalized not in index:
+                index[normalized] = record
 
         workbook.close()
         self.records = records
+        self._index = index
+
+    def find(self, part_no: str) -> SystemPartRecord | None:
+        normalized = normalize_part_no(part_no)
+        if not normalized:
+            return None
+        return self._index.get(normalized)
 
     def build_hierarchy(self, query: str | None = None) -> Dict[str, Dict]:
         keywords = _prepare_keywords(query)
