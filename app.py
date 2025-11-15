@@ -450,14 +450,21 @@ class BindingEditor:
         project_frame = Frame(main_frame)
         project_frame.pack(side=LEFT, fill=Y, padx=10, pady=10)
         Label(project_frame, text="项目列表").pack(anchor="w")
+        project_list_container = Frame(project_frame)
+        project_list_container.pack(fill=Y, expand=True)
         self.project_list = Listbox(
-            project_frame,
+            project_list_container,
             exportselection=False,
             height=15,
             activestyle="none",
             selectmode="browse",
         )
-        self.project_list.pack(fill=Y, expand=True)
+        self.project_list.pack(side=LEFT, fill=Y, expand=True)
+        project_scrollbar = Scrollbar(
+            project_list_container, orient="vertical", command=self.project_list.yview
+        )
+        project_scrollbar.pack(side=RIGHT, fill=Y)
+        self.project_list.config(yscrollcommand=project_scrollbar.set)
         self.project_list.bind("<<ListboxSelect>>", lambda _event: self._on_project_select())
         Button(project_frame, text="新增项目", command=self._add_project).pack(fill=BOTH, pady=2)
         Button(project_frame, text="删除项目", command=self._remove_project).pack(fill=BOTH, pady=2)
@@ -489,14 +496,21 @@ class BindingEditor:
         group_left = Frame(group_frame)
         group_left.pack(side=LEFT, fill=Y)
         Label(group_left, text="需求分组").pack(anchor="w")
+        group_list_container = Frame(group_left)
+        group_list_container.pack(fill=Y, expand=True)
         self.group_list = Listbox(
-            group_left,
+            group_list_container,
             exportselection=False,
             height=10,
             activestyle="none",
             selectmode="browse",
         )
-        self.group_list.pack(fill=Y, expand=True)
+        self.group_list.pack(side=LEFT, fill=Y, expand=True)
+        group_scrollbar = Scrollbar(
+            group_list_container, orient="vertical", command=self.group_list.yview
+        )
+        group_scrollbar.pack(side=RIGHT, fill=Y)
+        self.group_list.config(yscrollcommand=group_scrollbar.set)
         self.group_list.bind("<<ListboxSelect>>", lambda _event: self._on_group_select())
         Button(group_left, text="新增分组", command=self._add_group).pack(fill=BOTH, pady=2)
         Button(group_left, text="删除分组", command=self._remove_group).pack(fill=BOTH, pady=2)
@@ -585,6 +599,7 @@ class BindingEditor:
         self._clear_project_fields()
         if self.projects:
             self.project_list.selection_set(0)
+            self._ensure_project_visible(0)
             self._on_project_select()
 
     def _refresh_project_list(self) -> None:
@@ -592,6 +607,10 @@ class BindingEditor:
         for project in self.projects:
             display = f"{project.project_desc or '未命名'} ({project.index_part_no or '-'})"
             self.project_list.insert(END, display)
+
+    def _ensure_project_visible(self, index: int) -> None:
+        if 0 <= index < self.project_list.size():
+            self.project_list.see(index)
 
     def _clear_project_fields(self) -> None:
         self.project_desc_var.set("")
@@ -619,6 +638,7 @@ class BindingEditor:
             self._clear_project_fields()
             return
         self.selected_project_index = selection[0]
+        self._ensure_project_visible(self.selected_project_index)
         project = self.projects[self.selected_project_index]
         self.project_desc_var.set(project.project_desc)
         self.project_index_var.set(project.index_part_no)
@@ -644,6 +664,7 @@ class BindingEditor:
             if preserve_selection:
                 self.project_list.selection_clear(0, END)
                 self.project_list.selection_set(self.selected_project_index)
+                self._ensure_project_visible(self.selected_project_index)
 
     def _refresh_group_list(self) -> None:
         self.group_list.delete(0, END)
@@ -658,7 +679,12 @@ class BindingEditor:
             self.choice_tree.delete(item)
         if self.projects[self.selected_project_index].required_groups:
             self.group_list.selection_set(0)
+            self._ensure_group_visible(0)
             self._on_group_select()
+
+    def _ensure_group_visible(self, index: int) -> None:
+        if 0 <= index < self.group_list.size():
+            self.group_list.see(index)
 
     def _on_group_select(self) -> None:
         if self.selected_group_index is not None:
@@ -672,6 +698,7 @@ class BindingEditor:
             self._clear_choice_fields()
             return
         self.selected_group_index = selection[0]
+        self._ensure_group_visible(self.selected_group_index)
         group = self.projects[self.selected_project_index].required_groups[self.selected_group_index]
         self.group_name_var.set(group.group_name)
         self.group_number_var.set(str(group.number))
@@ -694,6 +721,7 @@ class BindingEditor:
             self.group_list.insert(self.selected_group_index, display)
             if preserve_selection:
                 self.group_list.selection_set(self.selected_group_index)
+                self._ensure_group_visible(self.selected_group_index)
 
     def _refresh_choice_list(self, auto_select_first: bool = False) -> None:
         self.choice_tree.selection_remove(self.choice_tree.selection())
@@ -799,6 +827,7 @@ class BindingEditor:
         self.project_list.selection_clear(0, END)
         new_index = len(self.projects) - 1
         self.project_list.selection_set(new_index)
+        self._ensure_project_visible(new_index)
         self.project_list.event_generate("<<ListboxSelect>>")
 
     def _remove_project(self) -> None:
@@ -813,6 +842,7 @@ class BindingEditor:
         if self.projects:
             new_index = min(index, len(self.projects) - 1)
             self.project_list.selection_set(new_index)
+            self._ensure_project_visible(new_index)
             self._on_project_select()
 
     def _move_project(self, direction: int) -> None:
@@ -834,6 +864,7 @@ class BindingEditor:
         self.selected_choice_index = None
         self.project_list.selection_clear(0, END)
         self.project_list.selection_set(target_index)
+        self._ensure_project_visible(target_index)
         self._on_project_select()
 
     def _copy_project(self) -> None:
@@ -855,6 +886,7 @@ class BindingEditor:
         new_index = len(self.projects) - 1
         self.project_list.selection_clear(0, END)
         self.project_list.selection_set(new_index)
+        self._ensure_project_visible(new_index)
         self.project_list.event_generate("<<ListboxSelect>>")
 
     def _add_group(self) -> None:
@@ -869,6 +901,7 @@ class BindingEditor:
         self._refresh_group_list()
         new_index = len(self.projects[self.selected_project_index].required_groups) - 1
         self.group_list.selection_set(new_index)
+        self._ensure_group_visible(new_index)
         self.group_list.event_generate("<<ListboxSelect>>")
 
     def _remove_group(self) -> None:
@@ -884,6 +917,7 @@ class BindingEditor:
         if groups:
             new_index = min(index, len(groups) - 1)
             self.group_list.selection_set(new_index)
+            self._ensure_group_visible(new_index)
             self._on_group_select()
 
     def _copy_group(self) -> None:
@@ -911,6 +945,7 @@ class BindingEditor:
         new_index = len(target_project.required_groups) - 1
         self.group_list.selection_clear(0, END)
         self.group_list.selection_set(new_index)
+        self._ensure_group_visible(new_index)
         self.group_list.event_generate("<<ListboxSelect>>")
 
     def _add_choice(self) -> None:
