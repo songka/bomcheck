@@ -333,8 +333,19 @@ class ExcelProcessor:
 
                 part_cell = row[part_col_idx]
                 summary.total_invalid_found += 1
+
+                record = ReplacementRecord(
+                    invalid_part_no=invalid_no,
+                    invalid_desc=invalid_desc,
+                    replacement_part_no=replacement_no,
+                    replacement_desc=replacement_desc,
+                    sheet_name=ws.title,
+                    row_index=row_idx,
+                )
+
                 if self._row_already_replaced(row, part_col_idx, part_cell, replacement_no):
                     summary.total_invalid_previously_marked += 1
+                    summary.records.append(record)
                     debug_logs.append(
                         f"[{ws.title}] 行{row_idx} 失效料号 {part_no} 已标记替换，跳过"
                     )
@@ -349,16 +360,7 @@ class ExcelProcessor:
                     ws.cell(row=row_idx, column=replacement_col + 1).value = replacement_desc
                     summary.total_replaced += 1
 
-                summary.records.append(
-                    ReplacementRecord(
-                        invalid_part_no=invalid_no,
-                        invalid_desc=invalid_desc,
-                        replacement_part_no=replacement_no,
-                        replacement_desc=replacement_desc,
-                        sheet_name=ws.title,
-                        row_index=row_idx,
-                    )
-                )
+                summary.records.append(record)
 
                 debug_logs.append(
                     f"[{ws.title}] 行{row_idx} 命中失效料号 {part_no} -> {replacement_no or '无替换'}"
@@ -554,9 +556,15 @@ class ExcelProcessor:
                 if parsed is None:
                     failure_count += 1
                     continue
-                numeric_count += 1
-                if isclose(parsed, round(parsed), abs_tol=1e-6):
+
+                is_positive_integer = parsed > 0 and isclose(
+                    parsed, round(parsed), abs_tol=1e-6
+                )
+                if is_positive_integer:
+                    numeric_count += 1
                     integer_count += 1
+                else:
+                    failure_count += 1
             if numeric_count:
                 numeric_scores.append(
                     (col_idx, integer_count, numeric_count, failure_count, total_count)
