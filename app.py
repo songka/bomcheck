@@ -15,15 +15,19 @@ from tkinter import (
     Frame,
     Label,
     Listbox,
+    Menu,
     Scrollbar,
     StringVar,
     Text,
-    Tk,
     Toplevel,
+    Tk,
     filedialog,
     messagebox,
 )
 from tkinter import ttk
+
+import csv
+from openpyxl import Workbook
 
 from bomcheck_app.binding_library import BindingChoice, BindingGroup, BindingLibrary, BindingProject
 from bomcheck_app.config import AppConfig, load_config, save_config
@@ -59,8 +63,10 @@ class Application:
         notebook.pack(fill=BOTH, expand=True)
 
         operation_tab = Frame(notebook)
+        system_part_tab = Frame(notebook)
         config_tab = Frame(notebook)
         notebook.add(operation_tab, text="执行")
+        notebook.add(system_part_tab, text="料号查询")
         notebook.add(config_tab, text="配置")
 
         config_file_frame = Frame(config_tab)
@@ -92,14 +98,14 @@ class Application:
         ).pack(side=LEFT, padx=5)
         Button(
             config_action_frame,
-            text="系统料号查询",
-            command=self._open_system_part_viewer,
-        ).pack(side=LEFT, padx=5)
-        Button(
-            config_action_frame,
             text="编辑屏蔽申请人",
             command=self._open_blocked_applicant_editor,
         ).pack(side=LEFT, padx=5)
+
+        system_viewer_frame = Frame(system_part_tab)
+        system_viewer_frame.pack(fill=BOTH, expand=True)
+        self.system_part_viewer = SystemPartViewer(system_viewer_frame, self.system_part_path)
+        self.system_part_viewer.pack(fill=BOTH, expand=True)
 
         operation_container = Frame(operation_tab)
         operation_container.pack(fill=BOTH, expand=True)
@@ -266,21 +272,6 @@ class Application:
 
     def _open_important_material_editor(self) -> None:
         ImportantMaterialEditor(self.root, self.config.important_materials)
-
-    def _open_system_part_viewer(self) -> None:
-        if not self.system_part_path:
-            messagebox.showerror("缺少配置", "请先在数据文件设置中配置系统料号文件。")
-            return
-        try:
-            self.system_part_viewer = SystemPartViewer(
-                self.root,
-                self.system_part_path,
-                on_close=lambda: setattr(self, "system_part_viewer", None),
-            )
-        except FileNotFoundError as exc:
-            messagebox.showerror("加载失败", str(exc))
-        except Exception as exc:  # pragma: no cover - user feedback
-            messagebox.showerror("加载失败", f"打开系统料号失败：{exc}")
 
     def _open_blocked_applicant_editor(self) -> None:
         if not self.blocked_applicant_path:
@@ -576,52 +567,49 @@ class DataFileEditor:
         return path
 
 
-class SystemPartViewer:
-    def __init__(
-        self,
-        master,
-        path: Path,
-        *,
-        on_close: Callable[[], None] | None = None,
-    ) -> None:
-        self.master = master
-        self.path = path
-        self.on_close = on_close
+class SystemPartViewer(Frame):
+    def __init__(self, master, path: Path | None) -> None:
+        super().__init__(master)
+        self.path: Path | None = path
         self.repository: SystemPartRepository | None = None
-        self.top = Toplevel(master)
-        self.top.title("系统料号查询")
-        self.top.transient(master)
-        self.top.resizable(True, True)
         self.search_var = StringVar()
         self.status_var = StringVar()
         self._build_ui()
         self.update_path(path)
-        self._load_data()
-        self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
 
-    def update_path(self, new_path: Path) -> None:
+    def update_path(self, new_path: Path | None) -> None:
         self.path = new_path
         if hasattr(self, "path_label"):
-            self.path_label.config(text=str(new_path))
-        if self.repository is not None:
-            try:
-                self.repository = SystemPartRepository(new_path)
-            except FileNotFoundError as exc:
-                messagebox.showerror("加载失败", str(exc))
-                return
-            except Exception as exc:  # pragma: no cover - user feedback
-                messagebox.showerror("加载失败", f"读取系统料号失败：{exc}")
-                return
-            self._refresh_tree()
+            self.path_label.config(text=str(new_path) if new_path else "未配置")
+        if not new_path:
+            self.repository = None
+            self._clear_tree()
+            self.status_var.set("未配置系统料号文件")
+            return
+        try:
+            self.repository = SystemPartRepository(new_path)
+        except FileNotFoundError as exc:
+            self.repository = None
+            self._clear_tree()
+            self.status_var.set(str(exc))
+            messagebox.showerror("加载失败", str(exc))
+            return
+        except Exception as exc:  # pragma: no cover - user feedback
+            self.repository = None
+            self._clear_tree()
+            self.status_var.set(f"读取失败：{exc}")
+            messagebox.showerror("加载失败", f"读取系统料号失败：{exc}")
+            return
+        self._refresh_tree()
 
     def _build_ui(self) -> None:
-        main_frame = Frame(self.top)
+        main_frame = Frame(self)
         main_frame.pack(fill=BOTH, expand=True)
 
         path_frame = Frame(main_frame)
         path_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
         Label(path_frame, text="文件路径：").pack(side=LEFT)
-        self.path_label = Label(path_frame, text=str(self.path), anchor="w")
+        self.path_label = Label(path_frame, text="", anchor="w")
         self.path_label.pack(side=LEFT, fill=BOTH, expand=True)
         Button(path_frame, text="重新加载", command=lambda: self._load_data(show_message=True)).pack(
             side=LEFT, padx=5
@@ -635,7 +623,7 @@ class SystemPartViewer:
         search_entry.bind("<Return>", lambda _event: self._perform_search())
         Button(search_frame, text="查找", command=self._perform_search).pack(side=LEFT, padx=5)
         Button(search_frame, text="清除", command=self._clear_search).pack(side=LEFT)
-        Button(search_frame, text="最大化", command=self._maximize_window).pack(side=LEFT, padx=5)
+        Button(search_frame, text="导出", command=self._export_records).pack(side=LEFT, padx=(10, 0))
 
         tree_frame = Frame(main_frame)
         tree_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
@@ -645,6 +633,7 @@ class SystemPartViewer:
             tree_frame,
             columns=("description", "unit", "applicant", "inventory"),
             show="tree headings",
+            selectmode="extended",
         )
         self.tree.pack(side=LEFT, fill=BOTH, expand=True)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -666,6 +655,23 @@ class SystemPartViewer:
         self.tree.tag_configure("category-level-4", background="#f0fbf0")
         self.tree.tag_configure("part", background="white")
 
+        self.context_menu = Menu(self.tree, tearoff=0)
+        self.context_menu.add_command(
+            label="复制整行",
+            command=lambda: self._copy_selection("row"),
+        )
+        self.context_menu.add_command(
+            label="复制料号",
+            command=lambda: self._copy_selection("part"),
+        )
+        self.context_menu.add_command(
+            label="复制描述",
+            command=lambda: self._copy_selection("description"),
+        )
+        self.tree.bind("<Button-3>", self._on_tree_right_click)
+        self.tree.bind("<Control-c>", lambda _event: self._copy_selection("row"))
+        self.tree.bind("<Command-c>", lambda _event: self._copy_selection("row"))
+
         status_frame = Frame(main_frame)
         status_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
         Label(status_frame, textvariable=self.status_var, anchor="w").pack(
@@ -679,13 +685,53 @@ class SystemPartViewer:
         self.search_var.set("")
         self._refresh_tree()
 
+    def _export_records(self) -> None:
+        if not self.repository:
+            messagebox.showerror("导出失败", "尚未加载系统料号数据。")
+            return
+        records = self._get_filtered_records()
+        if not records:
+            messagebox.showinfo("无数据", "没有可导出的料号记录。")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="导出料号",
+            defaultextension=".xlsx",
+            filetypes=[
+                ("Excel 工作簿", "*.xlsx"),
+                ("CSV 文件", "*.csv"),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if not file_path:
+            return
+
+        try:
+            if file_path.lower().endswith(".csv"):
+                self._export_to_csv(file_path, records)
+            else:
+                self._export_to_excel(file_path, records)
+        except Exception as exc:  # pragma: no cover - user feedback
+            messagebox.showerror("导出失败", f"导出文件失败：{exc}")
+        else:
+            messagebox.showinfo("导出成功", f"已导出到：{file_path}")
+
     def _load_data(self, show_message: bool = False) -> None:
+        if not self.path:
+            self.status_var.set("未配置系统料号文件")
+            return
         try:
             self.repository = SystemPartRepository(self.path)
         except FileNotFoundError as exc:
+            self.repository = None
+            self._clear_tree()
+            self.status_var.set(str(exc))
             messagebox.showerror("加载失败", str(exc))
             return
         except Exception as exc:  # pragma: no cover - user feedback
+            self.repository = None
+            self._clear_tree()
+            self.status_var.set(f"读取失败：{exc}")
             messagebox.showerror("加载失败", f"读取系统料号失败：{exc}")
             return
         self._refresh_tree()
@@ -694,11 +740,11 @@ class SystemPartViewer:
 
     def _refresh_tree(self) -> None:
         if not self.repository:
+            self._clear_tree()
             return
         query = self.search_var.get().strip()
         hierarchy = self.repository.build_hierarchy(query or None)
-        for item in self.tree.get_children(""):
-            self.tree.delete(item)
+        self._clear_tree()
         self._insert_nodes("", hierarchy)
         total = len(self.repository.records)
         if query:
@@ -708,8 +754,31 @@ class SystemPartViewer:
         else:
             self.status_var.set(f"共 {total} 条")
 
+    def _clear_tree(self) -> None:
+        for item in self.tree.get_children(""):
+            self.tree.delete(item)
+
+    def _on_tree_right_click(self, event) -> str | None:
+        item = self.tree.identify_row(event.y)
+        if item:
+            current_selection = set(self.tree.selection())
+            if item not in current_selection:
+                self.tree.selection_set(item)
+            self.tree.focus(item)
+            try:
+                self.context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self.context_menu.grab_release()
+        else:
+            self.tree.selection_remove(self.tree.selection())
+        return "break"
+
     def _insert_nodes(self, parent: str, node: Dict[str, Dict], depth: int = 1) -> None:
         for category, child in self._iter_collapsed_children(node, depth):
+            if self._should_skip_category(child):
+                for record in child.get("parts", []):
+                    self._insert_part(parent, record)
+                continue
             tags = ("category", f"category-level-{depth}")
             item_id = self.tree.insert(
                 parent, "end", text=category, values=("", "", "", ""), tags=tags
@@ -768,17 +837,6 @@ class SystemPartViewer:
             parts.extend(self._collect_all_parts(child))
         return parts
 
-    def _maximize_window(self) -> None:
-        try:
-            self.top.state("zoomed")
-        except Exception:
-            try:
-                self.top.attributes("-zoomed", True)
-            except Exception:
-                screen_width = self.top.winfo_screenwidth()
-                screen_height = self.top.winfo_screenheight()
-                self.top.geometry(f"{screen_width}x{screen_height}+0+0")
-
     def _expand_all(self) -> None:
         def expand(item: str) -> None:
             self.tree.item(item, open=True)
@@ -788,10 +846,79 @@ class SystemPartViewer:
         for item in self.tree.get_children(""):
             expand(item)
 
-    def _handle_close(self) -> None:
-        if self.on_close:
-            self.on_close()
-        self.top.destroy()
+    def _should_skip_category(self, node: Dict[str, Dict]) -> bool:
+        return not node.get("children") and len(node.get("parts", [])) == 1
+
+    def _get_filtered_records(self) -> list[SystemPartRecord]:
+        if not self.repository:
+            return []
+        query = self.search_var.get().strip()
+        if query:
+            return self.repository.search(query)
+        return list(self.repository.records)
+
+    def _export_to_excel(self, path: str, records: list[SystemPartRecord]) -> None:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "系统料号"
+        sheet.append(["料号", "描述", "单位", "申请人", "库存"])
+        for record in records:
+            sheet.append(
+                [
+                    record.part_no,
+                    record.description,
+                    record.unit,
+                    record.applicant,
+                    record.inventory_display,
+                ]
+            )
+        workbook.save(path)
+        workbook.close()
+
+    def _export_to_csv(self, path: str, records: list[SystemPartRecord]) -> None:
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["料号", "描述", "单位", "申请人", "库存"])
+            for record in records:
+                writer.writerow(
+                    [
+                        record.part_no,
+                        record.description,
+                        record.unit,
+                        record.applicant,
+                        record.inventory_display,
+                    ]
+                )
+
+    def _copy_selection(self, mode: str) -> None:
+        items = [
+            item
+            for item in self.tree.selection()
+            if "part" in self.tree.item(item, "tags")
+        ]
+        if not items:
+            messagebox.showinfo("复制失败", "请先选择要复制的料号。")
+            return
+
+        lines: list[str] = []
+        for item in items:
+            part_no = self.tree.item(item, "text")
+            description, unit, applicant, inventory = self.tree.item(item, "values")
+            if mode == "part":
+                lines.append(part_no)
+            elif mode == "description":
+                lines.append(description)
+            else:
+                lines.append(
+                    "\t".join(
+                        [part_no, description, unit, applicant, inventory]
+                    )
+                )
+
+        clipboard_text = "\n".join(lines)
+        self.tree.clipboard_clear()
+        self.tree.clipboard_append(clipboard_text)
+        self.status_var.set(f"已复制 {len(lines)} 条记录。")
 
 
 class BlockedApplicantEditor:
