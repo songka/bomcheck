@@ -998,7 +998,7 @@ class SystemPartViewer(Frame):
 
     def _schedule_preview_hide(self) -> None:
         self._cancel_preview_hide_timer()
-        self._preview_hide_after = self.after(120, self._maybe_close_preview)
+        self._preview_hide_after = self.after(350, self._maybe_close_preview)
 
     def _maybe_close_preview(self) -> None:
         self._preview_hide_after = None
@@ -2617,8 +2617,8 @@ class PartAssetManager:
         self.part_var = StringVar()
         self.desc_var = StringVar()
         self.model_var = StringVar()
-        self.url_var = StringVar()
-        self.search_var = StringVar()
+
+        self._part_validator = self.top.register(self._validate_part_no)
 
         self._build_ui()
         self._load_assets()
@@ -2645,7 +2645,13 @@ class PartAssetManager:
         form = Frame(right)
         form.pack(fill=BOTH, expand=True)
         Label(form, text="料号：").grid(row=0, column=0, sticky="e")
-        Entry(form, textvariable=self.part_var, width=28).grid(row=0, column=1, sticky="we")
+        Entry(
+            form,
+            textvariable=self.part_var,
+            width=18,
+            validate="key",
+            validatecommand=(self._part_validator, "%P"),
+        ).grid(row=0, column=1, sticky="we")
         Label(
             form,
             textvariable=self.desc_var,
@@ -2665,17 +2671,17 @@ class PartAssetManager:
         Label(form, text="本地地址（多行）：").grid(row=2, column=0, sticky="ne", pady=(8, 0))
         self.local_text = Text(form, height=3, width=40)
         self.local_text.grid(row=2, column=1, sticky="we", pady=(8, 0))
-        Label(form, text="网络地址（多行）：").grid(row=2, column=2, sticky="ne", pady=(8, 0))
+        Label(form, text="网络地址（多行）：").grid(row=3, column=0, sticky="ne", pady=(8, 0))
         self.remote_text = Text(form, height=3, width=40)
-        self.remote_text.grid(row=2, column=3, sticky="we", pady=(8, 0))
+        self.remote_text.grid(row=3, column=1, sticky="we", pady=(8, 0))
 
-        Label(form, text="图片列表：").grid(row=3, column=0, sticky="ne", pady=(8, 0))
+        Label(form, text="图片列表：").grid(row=4, column=0, sticky="ne", pady=(8, 0))
         img_frame = Frame(form)
-        img_frame.grid(row=3, column=1, sticky="w", pady=(8, 0))
+        img_frame.grid(row=4, column=1, sticky="w", pady=(8, 0))
         self.image_list = Listbox(img_frame, width=50, height=10)
         self.image_list.pack(side=LEFT, fill=BOTH, expand=True)
         img_btns = Frame(form)
-        img_btns.grid(row=3, column=2, sticky="nw", padx=6, pady=(8, 0))
+        img_btns.grid(row=4, column=2, sticky="nw", padx=6, pady=(8, 0))
         Button(img_btns, text="添加图片", command=self._add_images).pack(fill=BOTH)
         Button(img_btns, text="删除选中", command=self._remove_image).pack(fill=BOTH, pady=4)
         Button(img_btns, text="打开选中", command=self._open_image).pack(fill=BOTH)
@@ -2685,15 +2691,6 @@ class PartAssetManager:
         Button(img_btns, text="下移", command=lambda: self._move_image(1)).pack(
             fill=BOTH
         )
-        dl_frame = Frame(form)
-        dl_frame.grid(row=4, column=1, sticky="w", pady=(8, 0))
-        Entry(dl_frame, textvariable=self.url_var, width=46).pack(side=LEFT)
-        Button(dl_frame, text="下载图片", command=self._download_image).pack(side=LEFT, padx=4)
-        search_frame = Frame(form)
-        search_frame.grid(row=5, column=1, sticky="w")
-        Entry(search_frame, textvariable=self.search_var, width=46).pack(side=LEFT)
-        Button(search_frame, text="搜索并抓取", command=self._search_image).pack(side=LEFT, padx=4)
-
         action_bar = Frame(right)
         action_bar.pack(fill=BOTH, pady=10)
         Button(action_bar, text="保存资源", command=self._save_asset).pack(side=LEFT)
@@ -2803,8 +2800,12 @@ class PartAssetManager:
         indices = list(selection)
         existing = list(self.image_list.get(0, END))
         for idx in reversed(indices):
-            existing.pop(idx)
+            rel_path = existing.pop(idx)
             self.image_list.delete(idx)
+            try:
+                self.store.resolve_path(rel_path).unlink(missing_ok=True)
+            except Exception:
+                pass
         asset = self.store.get(self.part_var.get())
         if asset:
             asset.images = existing
@@ -2857,33 +2858,8 @@ class PartAssetManager:
             return
         open_file(self.store.resolve_path(rel))
 
-    def _download_image(self) -> None:
-        part_no = self._require_part_no()
-        if not part_no:
-            return
-        url = self.url_var.get().strip()
-        if not url:
-            messagebox.showerror("失败", "请先填写图片地址")
-            return
-        try:
-            rel = self.store.download_image(part_no, url)
-        except Exception as exc:
-            messagebox.showerror("失败", f"下载失败：{exc}")
-            return
-        self.image_list.insert(END, rel)
-        messagebox.showinfo("完成", "图片已下载")
-
-    def _search_image(self) -> None:
-        part_no = self._require_part_no()
-        if not part_no:
-            return
-        keyword = self.search_var.get().strip() or part_no
-        rel = self.store.download_first_image_from_search(part_no, keyword)
-        if not rel:
-            messagebox.showwarning("未找到", "未能抓取到图片，请尝试手动填写地址")
-            return
-        self.image_list.insert(END, rel)
-        messagebox.showinfo("完成", "已抓取图片")
+    def _validate_part_no(self, value: str) -> bool:
+        return len(value) <= 15
 
     def _require_part_no(self) -> str | None:
         part_no = self.part_var.get().strip()
