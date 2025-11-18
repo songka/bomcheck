@@ -757,6 +757,7 @@ class SystemPartViewer(Frame):
         self._preview_base_image: Image.Image | None = None
         self._preview_zoom: float = 1.0
         self._preview_image_frame: Frame | None = None
+        self._preview_frame_size = (440, 540)
         self._build_ui()
         self.update_path(path)
 
@@ -865,6 +866,7 @@ class SystemPartViewer(Frame):
         self.tree.bind("<Enter>", self._on_tree_enter)
         self.tree.bind("<Motion>", self._on_tree_motion)
         self.tree.bind("<Leave>", self._on_tree_leave)
+        self.tree.bind("<Button-1>", self._on_tree_click, add="+")
 
         status_frame = Frame(main_frame)
         status_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
@@ -1092,9 +1094,10 @@ class SystemPartViewer(Frame):
         self._preview_window.wm_overrideredirect(True)
         self._preview_window.bind("<Enter>", self._on_preview_enter)
         self._preview_window.bind("<Leave>", self._on_preview_leave)
-        if self._hover_coords:
-            x, y = self._hover_coords
-            self._preview_window.geometry(f"440x540+{x + 20}+{y + 20}")
+        self._preview_window.bind("<Control-MouseWheel>", self._on_preview_mousewheel)
+        self._preview_window.bind("<Control-Button-4>", self._on_preview_mousewheel)
+        self._preview_window.bind("<Control-Button-5>", self._on_preview_mousewheel)
+        self._position_preview_window()
 
         container = Frame(self._preview_window, bg="white", bd=1, relief="solid")
         container.pack(fill=BOTH, expand=True)
@@ -1222,6 +1225,7 @@ class SystemPartViewer(Frame):
             self._preview_base_image = self.asset_store.load_image_preview(
                 relative_path, max_size=(800, 800)
             )
+            self._preview_zoom = self._calculate_fit_zoom()
             self._render_preview_image()
         except Exception:
             pass
@@ -1231,7 +1235,7 @@ class SystemPartViewer(Frame):
             return
         if not self._preview_image_label:
             return
-        zoom = max(0.4, min(self._preview_zoom, 3.0))
+        zoom = max(0.1, min(self._preview_zoom, 3.0))
         self._preview_zoom = zoom
         target_width = int(self._preview_base_image.width * zoom)
         target_height = int(self._preview_base_image.height * zoom)
@@ -1276,6 +1280,55 @@ class SystemPartViewer(Frame):
             return
         self._preview_zoom += delta
         self._render_preview_image()
+
+    def _on_preview_mousewheel(self, event) -> str:
+        self._pause_slideshow()
+        direction = 0
+        if hasattr(event, "delta") and event.delta:
+            direction = 1 if event.delta > 0 else -1
+        elif getattr(event, "num", None) == 4:
+            direction = 1
+        elif getattr(event, "num", None) == 5:
+            direction = -1
+        if direction:
+            self._zoom_image(0.1 * direction)
+        return "break"
+
+    def _calculate_fit_zoom(self) -> float:
+        if not self._preview_base_image:
+            return 1.0
+        if not self._preview_image_frame:
+            return 1.0
+        frame_width = self._preview_image_frame.winfo_width() or self._preview_image_frame.winfo_reqwidth()
+        frame_height = self._preview_image_frame.winfo_height() or self._preview_image_frame.winfo_reqheight()
+        if frame_width <= 1 or frame_height <= 1:
+            frame_width, frame_height = 420, 320
+        scale = min(frame_width / self._preview_base_image.width, frame_height / self._preview_base_image.height)
+        return max(0.1, min(1.0, scale))
+
+    def _position_preview_window(self) -> None:
+        if not self._preview_window or not self._hover_coords:
+            return
+        width, height = self._preview_frame_size
+        offset = 20
+        x, y = self._hover_coords
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+
+        pos_x = x + offset
+        if pos_x + width > screen_w:
+            pos_x = x - width - offset
+            pos_x = max(0, min(pos_x, screen_w - width))
+
+        pos_y = y + offset
+        if pos_y + height > screen_h:
+            pos_y = y - height - offset
+            pos_y = max(0, min(pos_y, screen_h - height))
+
+        self._preview_window.geometry(f"{width}x{height}+{int(pos_x)}+{int(pos_y)}")
+
+    def _on_tree_click(self, _event=None) -> None:
+        self._cancel_preview(destroy_window=True, force=True)
 
     def _insert_nodes(self, parent: str, node: Dict[str, Dict], depth: int = 1) -> None:
         for category, child in self._iter_collapsed_children(node, depth):
