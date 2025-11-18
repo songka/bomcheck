@@ -5,7 +5,7 @@ from collections import defaultdict
 import re
 from math import isclose
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import Cell
@@ -674,59 +674,66 @@ class ExcelProcessor:
         debug_logs: List[str] = []
 
         for project in binding_library.iter_projects():
-            index_key = normalize_part_no(project.index_part_no)
-            project_qty = part_quantities.get(index_key, 0.0)
-            if project_qty <= 0:
+            index_candidates = self._resolve_index_candidates(
+                project, part_desc, part_display
+            )
+            if not index_candidates:
+                debug_logs.append(f"[绑定]{project.project_desc} 未找到索引料号或描述匹配，跳过")
                 continue
 
-            available_index_qty = available_inventory.get(index_key, 0.0)
-            if available_index_qty <= 0:
-                continue
+            for index_key, index_display in index_candidates:
+                project_qty = part_quantities.get(index_key, 0.0)
+                if project_qty <= 0:
+                    continue
 
-            consumption_qty = min(project_qty, available_index_qty)
-            if consumption_qty > 0:
-                index_consumption[index_key] += consumption_qty
-            used_parts.add(index_key)
+                available_index_qty = available_inventory.get(index_key, 0.0)
+                if available_index_qty <= 0:
+                    continue
 
-            debug_logs.append(
-                f"[绑定]{project.project_desc}({project.index_part_no}) 主料需求: {project_qty} 可用: {available_index_qty}"
-            )
+                consumption_qty = min(project_qty, available_index_qty)
+                if consumption_qty > 0:
+                    index_consumption[index_key] += consumption_qty
+                used_parts.add(index_key)
 
-            group_results: List[RequirementGroupResult] = []
-            for group in project.required_groups:
-                result = self._evaluate_group(
-                    group,
-                    consumption_qty,
-                    available_inventory,
-                    part_quantities,
-                    part_display,
+                debug_logs.append(
+                    f"[绑定]{project.project_desc}({index_display}) 主料需求: {project_qty} 可用: {available_index_qty}"
                 )
-                group_results.append(result)
 
-                if result.missing_qty > 0:
-                    for part_no in result.missing_choices:
-                        part_key = normalize_part_no(part_no)
-                        description = part_desc.get(part_key) or self._lookup_choice_desc(group, part_no)
-                        display_no = part_display.get(part_key, part_no)
-                        item = missing_items.setdefault(
-                            part_key,
-                            MissingItem(part_no=display_no, desc=description, missing_qty=0.0),
-                        )
-                        if not item.desc and description:
-                            item.desc = description
-                        item.missing_qty += result.missing_qty
+                group_results: List[RequirementGroupResult] = []
+                for group in project.required_groups:
+                    result = self._evaluate_group(
+                        group,
+                        consumption_qty,
+                        available_inventory,
+                        part_quantities,
+                        part_display,
+                    )
+                    group_results.append(result)
 
-                for matched_part_no in result.matched_details.keys():
-                    used_parts.add(normalize_part_no(matched_part_no))
+                    if result.missing_qty > 0:
+                        for part_no in result.missing_choices:
+                            part_key = normalize_part_no(part_no)
+                            description = part_desc.get(part_key) or self._lookup_choice_desc(group, part_no)
+                            display_no = part_display.get(part_key, part_no)
+                            item = missing_items.setdefault(
+                                part_key,
+                                MissingItem(part_no=display_no, desc=description, missing_qty=0.0),
+                            )
+                            if not item.desc and description:
+                                item.desc = description
+                            item.missing_qty += result.missing_qty
 
-            results.append(
-                BindingProjectResult(
-                    project_desc=project.project_desc,
-                    index_part_no=project.index_part_no,
-                    matched_quantity=consumption_qty,
-                    requirement_results=group_results,
+                    for matched_part_no in result.matched_details.keys():
+                        used_parts.add(normalize_part_no(matched_part_no))
+
+                results.append(
+                    BindingProjectResult(
+                        project_desc=project.project_desc,
+                        index_part_no=index_display,
+                        matched_quantity=consumption_qty,
+                        requirement_results=group_results,
+                    )
                 )
-            )
 
         return results, list(missing_items.values()), used_parts, index_consumption, debug_logs
 
@@ -850,6 +857,42 @@ class ExcelProcessor:
         if mode == "NOTANY":
             return not any(_has_part(part_no) for part_no in condition_keys)
         return True
+
+    def _resolve_index_candidates(
+        self,
+        project,
+        part_desc: Dict[str, str],
+        part_display: Dict[str, str],
+    ) -> List[Tuple[str, str]]:
+        if project.index_part_no:
+            index_key = normalize_part_no(project.index_part_no)
+            if not index_key:
+                return []
+            display_no = part_display.get(index_key, project.index_part_no)
+            return [(index_key, display_no)]
+
+        expression = (project.index_part_desc or "").strip()
+        if not expression:
+            return []
+
+        matcher = _build_description_matcher(expression)
+        matches: List[Tuple[str, str]] = []
+        for part_no, desc in part_desc.items():
+            if not desc:
+                continue
+            if not matcher(desc):
+                continue
+            display_no = part_display.get(part_no, part_no)
+            matches.append((part_no, display_no))
+
+        unique_matches = []
+        seen = set()
+        for part_no, display_no in matches:
+            if part_no in seen:
+                continue
+            seen.add(part_no)
+            unique_matches.append((part_no, display_no))
+        return unique_matches
 
     def _scan_important_materials(
         self,
@@ -1069,3 +1112,70 @@ class ExcelProcessor:
         if col_idx is None:
             return "未识别"
         return f"第{col_idx + 1}列"
+
+
+def _build_description_matcher(expression: str) -> Callable[[str], bool]:
+    tokens = _tokenize_description_expression(expression)
+    postfix = _to_postfix(tokens)
+    if not postfix:
+        return lambda desc: False
+
+    def _match(desc: str) -> bool:
+        if not desc:
+            return False
+        desc_lower = desc.lower()
+        stack: List[bool] = []
+        for item in postfix:
+            if isinstance(item, tuple) and item[0] == "KW":
+                keyword = item[1]
+                stack.append(keyword in desc_lower)
+            elif item == "AND":
+                if len(stack) < 2:
+                    return False
+                b = stack.pop()
+                a = stack.pop()
+                stack.append(a and b)
+            elif item == "OR":
+                if len(stack) < 2:
+                    return False
+                b = stack.pop()
+                a = stack.pop()
+                stack.append(a or b)
+        return bool(stack and stack[-1])
+
+    return _match
+
+
+def _tokenize_description_expression(expression: str) -> List[str]:
+    pattern = re.compile(r"\(|\)|(?i:and)|(?i:or)|[^()\s]+")
+    return [token for token in pattern.findall(expression) if token and token.strip()]
+
+
+def _to_postfix(tokens: List[str]) -> List[object]:
+    precedence = {"AND": 2, "OR": 1}
+    output: List[object] = []
+    operators: List[str] = []
+
+    for raw in tokens:
+        lowered = raw.lower()
+        if raw == "(":
+            operators.append(raw)
+        elif raw == ")":
+            while operators and operators[-1] != "(":
+                output.append(operators.pop())
+            if operators and operators[-1] == "(":
+                operators.pop()
+        elif lowered in ("and", "or"):
+            current = "AND" if lowered == "and" else "OR"
+            while operators and operators[-1] != "(" and precedence[operators[-1]] >= precedence[current]:
+                output.append(operators.pop())
+            operators.append(current)
+        else:
+            output.append(("KW", lowered))
+
+    while operators:
+        op = operators.pop()
+        if op in precedence:
+            output.append(op)
+
+    return output
