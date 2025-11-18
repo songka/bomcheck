@@ -4,6 +4,7 @@ import sys
 import threading
 import traceback
 import re
+import webbrowser
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable, Dict
@@ -31,6 +32,7 @@ from tkinter import ttk
 
 import csv
 from openpyxl import Workbook, load_workbook
+from PIL import ImageTk
 
 from bomcheck_app.binding_library import BindingChoice, BindingGroup, BindingLibrary, BindingProject
 from bomcheck_app.config import AppConfig, load_config, save_config
@@ -41,6 +43,7 @@ from bomcheck_app.excel_processor import (
     normalize_part_no,
 )
 from bomcheck_app.models import ExecutionResult
+from bomcheck_app.part_assets import PartAsset, PartAssetStore, open_file
 from bomcheck_app.system_parts import (
     SystemPartRecord,
     SystemPartRepository,
@@ -68,6 +71,7 @@ class Application:
         self._system_part_repository_path: Path | None = None
         self.system_part_viewer: SystemPartViewer | None = None
         self.blocked_editor: BlockedApplicantEditor | None = None
+        self.part_asset_store: PartAssetStore | None = None
         self._apply_config(self.config_path)
         self.selected_file: Path | None = None
         self._execution_lock = threading.Lock()
@@ -123,12 +127,18 @@ class Application:
             text="编辑屏蔽申请人",
             command=self._open_blocked_applicant_editor,
         ).pack(side=LEFT, padx=5)
+        Button(
+            config_action_frame,
+            text="维护料号资源",
+            command=self._open_part_asset_manager,
+        ).pack(side=LEFT, padx=5)
 
         system_viewer_frame = Frame(system_part_tab)
         system_viewer_frame.pack(fill=BOTH, expand=True)
         self.system_part_viewer = SystemPartViewer(
             system_viewer_frame,
             self.system_part_path,
+            asset_store=self.part_asset_store,
             on_repository_update=self._set_system_part_repository,
         )
         self.system_part_viewer.pack(fill=BOTH, expand=True)
@@ -167,16 +177,19 @@ class Application:
         binding_library = BindingLibrary(config.binding_library)
         binding_library.load()
         processor = ExcelProcessor(config)
+        part_asset_store = PartAssetStore(config.part_asset_dir)
         self.config_path = path
         self.config = config
         self.binding_library = binding_library
         self.processor = processor
+        self.part_asset_store = part_asset_store
         self.system_part_path = config.system_part_db
         self.system_part_repository = None
         self._system_part_repository_path = None
         self.blocked_applicant_path = config.blocked_applicants
         if self.system_part_viewer is not None:
             self.system_part_viewer.update_path(config.system_part_db)
+            self.system_part_viewer.update_asset_store(part_asset_store)
         if self.blocked_editor is not None:
             self.blocked_editor.update_path(config.blocked_applicants)
         self._refresh_config_entry()
@@ -320,6 +333,16 @@ class Application:
             self.root,
             self.blocked_applicant_path,
             on_close=lambda: setattr(self, "blocked_editor", None),
+        )
+
+    def _open_part_asset_manager(self) -> None:
+        if not self.part_asset_store:
+            messagebox.showerror("缺少配置", "请先在数据文件设置中配置料号资源目录。")
+            return
+        PartAssetManager(
+            self.root,
+            self.part_asset_store,
+            part_lookup=self._lookup_system_part_desc,
         )
 
     def _lookup_system_part_desc(self, part_no: str) -> str:
@@ -470,6 +493,7 @@ class DataFileEditor:
         self.important_var = StringVar(value=str(config.important_materials))
         self.system_part_var = StringVar(value=str(config.system_part_db))
         self.blocked_var = StringVar(value=str(config.blocked_applicants))
+        self.asset_var = StringVar(value=str(config.part_asset_dir))
 
         self._build_ui()
 
@@ -520,6 +544,14 @@ class DataFileEditor:
             text_var=self.blocked_var,
             filetypes=[("文本", "*.txt"), ("所有文件", "*.*")],
         )
+        self._build_file_selector(
+            frame,
+            row=6,
+            label_text="料号资源目录：",
+            text_var=self.asset_var,
+            filetypes=[("目录", "*.*")],
+            is_directory=True,
+        )
 
         button_frame = Frame(self.top)
         button_frame.pack(fill=BOTH, pady=(0, 10))
@@ -534,6 +566,7 @@ class DataFileEditor:
         label_text: str,
         text_var: StringVar,
         filetypes: list[tuple[str, str]],
+        is_directory: bool = False,
     ) -> None:
         Label(frame, text=label_text).grid(row=row, column=0, sticky="w", pady=5)
         entry = Entry(frame, textvariable=text_var, width=50)
@@ -541,16 +574,21 @@ class DataFileEditor:
         Button(
             frame,
             text="浏览",
-            command=lambda var=text_var, types=filetypes: self._choose_file(var, types),
+            command=lambda var=text_var, types=filetypes, as_dir=is_directory: self._choose_file(
+                var, types, as_dir
+            ),
         ).grid(row=row, column=2)
         frame.columnconfigure(1, weight=1)
 
     def _choose_file(
-        self, var: StringVar, filetypes: list[tuple[str, str]]
+        self, var: StringVar, filetypes: list[tuple[str, str]], is_directory: bool = False
     ) -> None:  # pragma: no cover - user interaction
-        file_path = filedialog.askopenfilename(filetypes=filetypes)
-        if file_path:
-            var.set(file_path)
+        if is_directory:
+            selected = filedialog.askdirectory()
+        else:
+            selected = filedialog.askopenfilename(filetypes=filetypes)
+        if selected:
+            var.set(selected)
 
     def _on_save(self) -> None:
         invalid_path = self.invalid_var.get().strip()
@@ -558,6 +596,7 @@ class DataFileEditor:
         important_path = self.important_var.get().strip()
         system_part_path = self.system_part_var.get().strip()
         blocked_path = self.blocked_var.get().strip()
+        asset_path = self.asset_var.get().strip()
 
         if not invalid_path or not binding_path:
             messagebox.showerror("保存失败", "请完整填写数据库文件路径。")
@@ -571,6 +610,9 @@ class DataFileEditor:
         if not blocked_path:
             messagebox.showerror("保存失败", "请填写屏蔽申请人列表路径。")
             return
+        if not asset_path:
+            messagebox.showerror("保存失败", "请填写料号资源目录。")
+            return
 
         new_config = AppConfig(
             invalid_part_db=self._normalize_path(invalid_path),
@@ -578,6 +620,7 @@ class DataFileEditor:
             important_materials=self._normalize_path(important_path),
             system_part_db=self._normalize_path(system_part_path),
             blocked_applicants=self._normalize_path(blocked_path),
+            part_asset_dir=self._normalize_path(asset_path),
         )
 
         try:
@@ -643,14 +686,21 @@ class SystemPartViewer(Frame):
         master,
         path: Path | None,
         *,
+        asset_store: PartAssetStore | None = None,
         on_repository_update: Callable[[SystemPartRepository | None], None] | None = None,
     ) -> None:
         super().__init__(master)
         self.path: Path | None = path
         self.repository: SystemPartRepository | None = None
+        self.asset_store = asset_store
         self.search_var = StringVar()
         self.status_var = StringVar()
         self.on_repository_update = on_repository_update
+        self._hover_item: str | None = None
+        self._hover_coords: tuple[int, int] | None = None
+        self._preview_after: str | None = None
+        self._preview_window: Toplevel | None = None
+        self._preview_photo: ImageTk.PhotoImage | None = None
         self._build_ui()
         self.update_path(path)
 
@@ -682,6 +732,10 @@ class SystemPartViewer(Frame):
             return
         self._refresh_tree()
         self._notify_repository_update()
+
+    def update_asset_store(self, store: PartAssetStore | None) -> None:
+        self.asset_store = store
+        self._cancel_preview(destroy_window=True)
 
     def _build_ui(self) -> None:
         main_frame = Frame(self)
@@ -752,6 +806,8 @@ class SystemPartViewer(Frame):
         self.tree.bind("<Button-3>", self._on_tree_right_click)
         self.tree.bind("<Control-c>", lambda _event: self._copy_selection("row"))
         self.tree.bind("<Command-c>", lambda _event: self._copy_selection("row"))
+        self.tree.bind("<Motion>", self._on_tree_motion)
+        self.tree.bind("<Leave>", self._on_tree_leave)
 
         status_frame = Frame(main_frame)
         status_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
@@ -861,6 +917,118 @@ class SystemPartViewer(Frame):
         else:
             self.tree.selection_remove(self.tree.selection())
         return "break"
+
+    def _on_tree_motion(self, event) -> None:
+        item = self.tree.identify_row(event.y)
+        if item != self._hover_item:
+            self._hover_item = item
+            self._hover_coords = (event.x_root, event.y_root)
+            self._schedule_preview()
+        else:
+            self._hover_coords = (event.x_root, event.y_root)
+
+    def _on_tree_leave(self, _event) -> None:
+        self._hover_item = None
+        self._cancel_preview(destroy_window=True)
+
+    def _schedule_preview(self) -> None:
+        self._cancel_preview(destroy_window=True)
+        if not self._hover_item or not self.asset_store:
+            return
+        if "part" not in self.tree.item(self._hover_item, "tags"):
+            return
+        self._preview_after = self.after(1000, self._show_preview)
+
+    def _cancel_preview(self, destroy_window: bool = False) -> None:
+        if self._preview_after:
+            try:
+                self.after_cancel(self._preview_after)
+            except Exception:
+                pass
+            self._preview_after = None
+        if destroy_window and self._preview_window:
+            try:
+                self._preview_window.destroy()
+            except Exception:
+                pass
+            self._preview_window = None
+            self._preview_photo = None
+
+    def _show_preview(self) -> None:
+        if not self._hover_item or not self.asset_store:
+            return
+        if "part" not in self.tree.item(self._hover_item, "tags"):
+            return
+        part_no = self.tree.item(self._hover_item, "text")
+        asset = self.asset_store.get(part_no)
+        if not asset:
+            return
+        has_image = bool(asset.images)
+        has_links = bool(asset.remote_links or asset.local_paths or asset.model_file)
+        if not has_image and not has_links:
+            return
+        self._cancel_preview(destroy_window=True)
+        self._preview_window = Toplevel(self)
+        self._preview_window.wm_overrideredirect(True)
+        if self._hover_coords:
+            x, y = self._hover_coords
+            self._preview_window.geometry(f"440x540+{x + 20}+{y + 20}")
+
+        container = Frame(self._preview_window, bg="white", bd=1, relief="solid")
+        container.pack(fill=BOTH, expand=True)
+        description = self.tree.item(self._hover_item, "values")[0]
+        Label(
+            container,
+            text=f"{part_no} {description}",
+            bg="white",
+            anchor="w",
+            wraplength=400,
+            justify="left",
+        ).pack(fill=BOTH, padx=8, pady=(6, 4))
+
+        if asset.images:
+            try:
+                image = self.asset_store.load_image_preview(asset.images[0])
+                self._preview_photo = ImageTk.PhotoImage(image)
+                Label(container, image=self._preview_photo, bg="white").pack(
+                    padx=8, pady=4
+                )
+            except Exception:
+                Label(container, text="图片预览失败", bg="white", fg="red").pack(
+                    fill=BOTH, padx=8, pady=4
+                )
+            if len(asset.images) > 1:
+                Label(
+                    container,
+                    text=f"共 {len(asset.images)} 张图片，鼠标右键可在资源维护中切换",  # hint
+                    bg="white",
+                    fg="#555",
+                ).pack(anchor="w", padx=8)
+
+        if asset.model_file or asset.local_paths or asset.remote_links:
+            info = Frame(container, bg="white")
+            info.pack(fill=BOTH, padx=8, pady=4)
+            if asset.model_file:
+                model_path = self.asset_store.resolve_path(asset.model_file)
+                Button(
+                    info,
+                    text="打开3D文件",
+                    command=lambda p=model_path: open_file(p),
+                ).pack(anchor="w")
+            for local in asset.local_paths:
+                Button(
+                    info,
+                    text=f"本地：{local}",
+                    command=lambda p=local: open_file(Path(p)),
+                    anchor="w",
+                ).pack(fill=BOTH, anchor="w")
+            for link in asset.remote_links:
+                Button(
+                    info,
+                    text=f"网络：{link}",
+                    command=lambda url=link: webbrowser.open(url),
+                    anchor="w",
+                ).pack(fill=BOTH, anchor="w")
 
     def _insert_nodes(self, parent: str, node: Dict[str, Dict], depth: int = 1) -> None:
         for category, child in self._iter_collapsed_children(node, depth):
@@ -2312,6 +2480,277 @@ class BindingEditor:
             messagebox.showerror("错误", f"保存失败：{exc}")
             return
         messagebox.showinfo("完成", "保存成功")
+
+
+class PartAssetManager:
+    def __init__(self, master, store: PartAssetStore, *, part_lookup: Callable[[str], str] | None = None):
+        self.store = store
+        self.part_lookup = part_lookup or (lambda _p: "")
+        self.selected_part: str | None = None
+        self.current_asset: PartAsset | None = None
+
+        self.top = Toplevel(master)
+        self.top.title("料号资源维护")
+        self.top.geometry("980x640")
+
+        self.part_var = StringVar()
+        self.desc_var = StringVar()
+        self.model_var = StringVar()
+        self.url_var = StringVar()
+        self.search_var = StringVar()
+
+        self._build_ui()
+        self._load_assets()
+
+    def _build_ui(self) -> None:
+        main = Frame(self.top)
+        main.pack(fill=BOTH, expand=True, padx=10, pady=10)
+
+        left = Frame(main)
+        left.pack(side=LEFT, fill=Y)
+        Label(left, text="已配置料号").pack(anchor="w")
+        self.asset_listbox = Listbox(left, width=28)
+        self.asset_listbox.pack(fill=Y, expand=True)
+        self.asset_listbox.bind("<<ListboxSelect>>", self._on_asset_select)
+        list_btns = Frame(left)
+        list_btns.pack(fill=BOTH, pady=5)
+        Button(list_btns, text="新增", command=self._new_asset).pack(side=LEFT)
+        Button(list_btns, text="删除", command=self._delete_asset).pack(side=LEFT, padx=5)
+        Button(list_btns, text="刷新", command=self._load_assets).pack(side=LEFT)
+
+        right = Frame(main)
+        right.pack(side=LEFT, fill=BOTH, expand=True, padx=(10, 0))
+
+        form = Frame(right)
+        form.pack(fill=BOTH, expand=True)
+        Label(form, text="料号：").grid(row=0, column=0, sticky="e")
+        Entry(form, textvariable=self.part_var, width=28).grid(row=0, column=1, sticky="w")
+        Label(form, textvariable=self.desc_var, anchor="w").grid(row=0, column=2, sticky="w", padx=6)
+
+        Label(form, text="模型文件：").grid(row=1, column=0, sticky="e", pady=(8, 0))
+        Entry(form, textvariable=self.model_var, width=40, state="readonly").grid(row=1, column=1, sticky="w", pady=(8, 0))
+        model_btns = Frame(form)
+        model_btns.grid(row=1, column=2, sticky="w", pady=(8, 0))
+        Button(model_btns, text="选择", command=self._choose_model).pack(side=LEFT)
+        Button(model_btns, text="打开", command=self._open_model).pack(side=LEFT, padx=4)
+        Button(model_btns, text="清除", command=self._clear_model).pack(side=LEFT)
+
+        Label(form, text="本地地址（多行）：").grid(row=2, column=0, sticky="ne", pady=(8, 0))
+        self.local_text = Text(form, height=3, width=40)
+        self.local_text.grid(row=2, column=1, sticky="we", pady=(8, 0))
+        Label(form, text="网络地址（多行）：").grid(row=2, column=2, sticky="ne", pady=(8, 0))
+        self.remote_text = Text(form, height=3, width=40)
+        self.remote_text.grid(row=2, column=3, sticky="we", pady=(8, 0))
+
+        Label(form, text="图片列表：").grid(row=3, column=0, sticky="ne", pady=(8, 0))
+        img_frame = Frame(form)
+        img_frame.grid(row=3, column=1, sticky="w", pady=(8, 0))
+        self.image_list = Listbox(img_frame, width=50, height=10)
+        self.image_list.pack(side=LEFT, fill=BOTH)
+        img_btns = Frame(form)
+        img_btns.grid(row=3, column=2, sticky="nw", padx=6, pady=(8, 0))
+        Button(img_btns, text="添加图片", command=self._add_images).pack(fill=BOTH)
+        Button(img_btns, text="删除选中", command=self._remove_image).pack(fill=BOTH, pady=4)
+        Button(img_btns, text="打开选中", command=self._open_image).pack(fill=BOTH)
+        dl_frame = Frame(form)
+        dl_frame.grid(row=4, column=1, sticky="w", pady=(8, 0))
+        Entry(dl_frame, textvariable=self.url_var, width=46).pack(side=LEFT)
+        Button(dl_frame, text="下载图片", command=self._download_image).pack(side=LEFT, padx=4)
+        search_frame = Frame(form)
+        search_frame.grid(row=5, column=1, sticky="w")
+        Entry(search_frame, textvariable=self.search_var, width=46).pack(side=LEFT)
+        Button(search_frame, text="搜索并抓取", command=self._search_image).pack(side=LEFT, padx=4)
+
+        action_bar = Frame(right)
+        action_bar.pack(fill=BOTH, pady=10)
+        Button(action_bar, text="保存资源", command=self._save_asset).pack(side=LEFT)
+        Button(action_bar, text="关闭", command=self.top.destroy).pack(side=LEFT, padx=6)
+
+        for idx in range(4):
+            form.columnconfigure(idx, weight=1)
+
+    def _load_assets(self) -> None:
+        self.asset_listbox.delete(0, END)
+        self._asset_index: list[str] = []
+        for asset in self.store.list_assets():
+            desc = self.part_lookup(asset.part_no)
+            display = f"{asset.part_no} - {desc}" if desc else asset.part_no
+            self._asset_index.append(asset.part_no)
+            self.asset_listbox.insert(END, display)
+        if self.selected_part:
+            self._select_part(self.selected_part)
+
+    def _select_part(self, part_no: str) -> None:
+        if part_no in getattr(self, "_asset_index", []):
+            idx = self._asset_index.index(part_no)
+            self.asset_listbox.selection_clear(0, END)
+            self.asset_listbox.selection_set(idx)
+            self.asset_listbox.activate(idx)
+        self._load_detail(part_no)
+
+    def _on_asset_select(self, _event=None) -> None:
+        selection = self.asset_listbox.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        part_no = self._asset_index[index]
+        self._load_detail(part_no)
+
+    def _load_detail(self, part_no: str | None) -> None:
+        self.selected_part = part_no
+        asset = self.store.get(part_no) if part_no else None
+        if not asset and part_no:
+            asset = PartAsset(part_no=normalize_part_no(part_no) or part_no)
+        self.current_asset = asset
+        self.part_var.set(part_no or "")
+        self.desc_var.set(self.part_lookup(part_no) if part_no else "")
+        self.model_var.set(asset.model_file if asset else "")
+        self.image_list.delete(0, END)
+        for rel in asset.images if asset else []:
+            self.image_list.insert(END, rel)
+        self.local_text.delete("1.0", END)
+        self.remote_text.delete("1.0", END)
+        if asset:
+            if asset.local_paths:
+                self.local_text.insert(END, "\n".join(asset.local_paths))
+            if asset.remote_links:
+                self.remote_text.insert(END, "\n".join(asset.remote_links))
+
+    def _new_asset(self) -> None:
+        self.asset_listbox.selection_clear(0, END)
+        self._load_detail("")
+
+    def _delete_asset(self) -> None:
+        selection = self.asset_listbox.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        part_no = self._asset_index[index]
+        if not messagebox.askyesno("确认", f"删除 {part_no} 的资源？"):
+            return
+        self.store.remove(part_no)
+        self._load_assets()
+        self._load_detail("")
+
+    def _save_asset(self) -> None:
+        part_no = self.part_var.get().strip()
+        normalized = normalize_part_no(part_no)
+        if not normalized:
+            messagebox.showerror("保存失败", "请填写有效的料号。")
+            return
+        asset = self.store.get(normalized) or PartAsset(part_no=normalized)
+        asset.part_no = normalized
+        asset.model_file = self.model_var.get().strip() or None
+        asset.images = list(self.image_list.get(0, END))
+        asset.local_paths = _split_lines(self.local_text.get("1.0", END))
+        asset.remote_links = _split_lines(self.remote_text.get("1.0", END))
+        self.store.upsert(asset)
+        self.selected_part = normalized
+        self._load_assets()
+        messagebox.showinfo("完成", "资源已保存")
+
+    def _add_images(self) -> None:
+        part_no = self._require_part_no()
+        if not part_no:
+            return
+        file_paths = filedialog.askopenfilenames(
+            title="选择图片",
+            filetypes=[("图片", "*.png *.jpg *.jpeg *.bmp *.gif"), ("所有文件", "*.*")],
+        )
+        if not file_paths:
+            return
+        added = self.store.add_images(part_no, [Path(p) for p in file_paths])
+        for rel in added:
+            self.image_list.insert(END, rel)
+
+    def _remove_image(self) -> None:
+        selection = self.image_list.curselection()
+        if not selection:
+            return
+        indices = list(selection)
+        existing = list(self.image_list.get(0, END))
+        for idx in reversed(indices):
+            existing.pop(idx)
+            self.image_list.delete(idx)
+        asset = self.store.get(self.part_var.get())
+        if asset:
+            asset.images = existing
+            self.store.upsert(asset)
+
+    def _open_image(self) -> None:
+        selection = self.image_list.curselection()
+        if not selection:
+            return
+        rel = self.image_list.get(selection[0])
+        open_file(self.store.resolve_path(rel))
+
+    def _choose_model(self) -> None:
+        part_no = self._require_part_no()
+        if not part_no:
+            return
+        file_path = filedialog.askopenfilename(
+            title="选择3D文件",
+            filetypes=[("模型", "*.step *.stp *.stl *.obj *.iges *.igs"), ("所有文件", "*.*")],
+        )
+        if not file_path:
+            return
+        rel = self.store.set_model_file(part_no, Path(file_path))
+        self.model_var.set(rel)
+
+    def _clear_model(self) -> None:
+        asset = self.store.get(self.part_var.get())
+        if not asset:
+            return
+        asset.model_file = None
+        self.store.upsert(asset)
+        self.model_var.set("")
+
+    def _open_model(self) -> None:
+        rel = self.model_var.get().strip()
+        if not rel:
+            return
+        open_file(self.store.resolve_path(rel))
+
+    def _download_image(self) -> None:
+        part_no = self._require_part_no()
+        if not part_no:
+            return
+        url = self.url_var.get().strip()
+        if not url:
+            messagebox.showerror("失败", "请先填写图片地址")
+            return
+        try:
+            rel = self.store.download_image(part_no, url)
+        except Exception as exc:
+            messagebox.showerror("失败", f"下载失败：{exc}")
+            return
+        self.image_list.insert(END, rel)
+        messagebox.showinfo("完成", "图片已下载")
+
+    def _search_image(self) -> None:
+        part_no = self._require_part_no()
+        if not part_no:
+            return
+        keyword = self.search_var.get().strip() or part_no
+        rel = self.store.download_first_image_from_search(part_no, keyword)
+        if not rel:
+            messagebox.showwarning("未找到", "未能抓取到图片，请尝试手动填写地址")
+            return
+        self.image_list.insert(END, rel)
+        messagebox.showinfo("完成", "已抓取图片")
+
+    def _require_part_no(self) -> str | None:
+        part_no = self.part_var.get().strip()
+        normalized = normalize_part_no(part_no)
+        if not normalized:
+            messagebox.showerror("缺少料号", "请先填写有效的料号后再操作。")
+            return None
+        self.part_var.set(normalized)
+        return normalized
+
+
+def _split_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
 
 
 class ImportantMaterialEditor:
