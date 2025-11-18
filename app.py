@@ -71,6 +71,11 @@ class Application:
         self._system_part_repository_path: Path | None = None
         self.system_part_viewer: SystemPartViewer | None = None
         self.blocked_editor: BlockedApplicantEditor | None = None
+        self.binding_editor: BindingEditor | None = None
+        self.invalid_part_editor: InvalidPartEditor | None = None
+        self.important_editor: ImportantMaterialEditor | None = None
+        self.data_file_editor: DataFileEditor | None = None
+        self.part_asset_manager: PartAssetManager | None = None
         self.part_asset_store: PartAssetStore | None = None
         self._apply_config(self.config_path)
         self.selected_file: Path | None = None
@@ -210,11 +215,14 @@ class Application:
             messagebox.showinfo("配置已更新", f"已重新加载：{self.config_path}")
 
     def _open_data_file_editor(self) -> None:
-        DataFileEditor(
+        if self._reuse_window(self.data_file_editor):
+            return
+        self.data_file_editor = DataFileEditor(
             self.root,
             self.config,
             self.config_path.parent,
             self._handle_data_file_save,
+            on_close=lambda: setattr(self, "data_file_editor", None),
         )
 
     def _handle_data_file_save(self, new_config: AppConfig) -> None:
@@ -309,21 +317,33 @@ class Application:
         decision_event.wait()
 
     def _open_binding_editor(self) -> None:
-        BindingEditor(
+        if self._reuse_window(self.binding_editor):
+            return
+        self.binding_editor = BindingEditor(
             self.root,
             self.binding_library,
             part_lookup=self._lookup_system_part_desc,
+            on_close=lambda: setattr(self, "binding_editor", None),
         )
 
     def _open_invalid_part_editor(self) -> None:
-        InvalidPartEditor(
+        if self._reuse_window(self.invalid_part_editor):
+            return
+        self.invalid_part_editor = InvalidPartEditor(
             self.root,
             self.config.invalid_part_db,
             part_lookup=self._lookup_system_part_desc,
+            on_close=lambda: setattr(self, "invalid_part_editor", None),
         )
 
     def _open_important_material_editor(self) -> None:
-        ImportantMaterialEditor(self.root, self.config.important_materials)
+        if self._reuse_window(self.important_editor):
+            return
+        self.important_editor = ImportantMaterialEditor(
+            self.root,
+            self.config.important_materials,
+            on_close=lambda: setattr(self, "important_editor", None),
+        )
 
     def _open_blocked_applicant_editor(self) -> None:
         if not self.blocked_applicant_path:
@@ -339,10 +359,13 @@ class Application:
         if not self.part_asset_store:
             messagebox.showerror("缺少配置", "请先在数据文件设置中配置料号资源目录。")
             return
-        PartAssetManager(
+        if self._reuse_window(self.part_asset_manager):
+            return
+        self.part_asset_manager = PartAssetManager(
             self.root,
             self.part_asset_store,
             part_lookup=self._lookup_system_part_desc,
+            on_close=lambda: setattr(self, "part_asset_manager", None),
         )
 
     def _lookup_system_part_desc(self, part_no: str) -> str:
@@ -367,6 +390,17 @@ class Application:
             return None
         self._set_system_part_repository(repository)
         return repository
+
+    def _reuse_window(self, editor) -> bool:
+        try:
+            if editor and editor.top.winfo_exists():
+                editor.top.deiconify()
+                editor.top.lift()
+                editor.top.focus_force()
+                return True
+        except Exception:
+            return False
+        return False
 
     def _set_system_part_repository(
         self, repository: SystemPartRepository | None
@@ -480,13 +514,17 @@ class DataFileEditor:
         config: AppConfig,
         base_dir: Path,
         on_save: Callable[[AppConfig], None],
+        *,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         self.base_dir = base_dir
         self.on_save = on_save
+        self.on_close = on_close
         self.top = Toplevel(master)
         self.top.title("数据文件设置")
         self.top.transient(master)
         self.top.grab_set()
+        self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
 
         self.invalid_var = StringVar(value=str(config.invalid_part_db))
         self.binding_var = StringVar(value=str(config.binding_library))
@@ -496,6 +534,14 @@ class DataFileEditor:
         self.asset_var = StringVar(value=str(config.part_asset_dir))
 
         self._build_ui()
+
+    def _handle_close(self) -> None:
+        if self.on_close:
+            try:
+                self.on_close()
+            except Exception:
+                pass
+        self.top.destroy()
 
     def _build_ui(self) -> None:
         frame = Frame(self.top)
@@ -701,6 +747,9 @@ class SystemPartViewer(Frame):
         self._preview_after: str | None = None
         self._preview_window: Toplevel | None = None
         self._preview_photo: ImageTk.PhotoImage | None = None
+        self._preview_hide_after: str | None = None
+        self._tree_hover = False
+        self._preview_hover = False
         self._build_ui()
         self.update_path(path)
 
@@ -806,6 +855,7 @@ class SystemPartViewer(Frame):
         self.tree.bind("<Button-3>", self._on_tree_right_click)
         self.tree.bind("<Control-c>", lambda _event: self._copy_selection("row"))
         self.tree.bind("<Command-c>", lambda _event: self._copy_selection("row"))
+        self.tree.bind("<Enter>", self._on_tree_enter)
         self.tree.bind("<Motion>", self._on_tree_motion)
         self.tree.bind("<Leave>", self._on_tree_leave)
 
@@ -918,7 +968,13 @@ class SystemPartViewer(Frame):
             self.tree.selection_remove(self.tree.selection())
         return "break"
 
+    def _on_tree_enter(self, _event=None) -> None:
+        self._tree_hover = True
+        self._cancel_preview_hide_timer()
+
     def _on_tree_motion(self, event) -> None:
+        self._tree_hover = True
+        self._cancel_preview_hide_timer()
         item = self.tree.identify_row(event.y)
         if item != self._hover_item:
             self._hover_item = item
@@ -929,30 +985,59 @@ class SystemPartViewer(Frame):
 
     def _on_tree_leave(self, _event) -> None:
         self._hover_item = None
-        self._cancel_preview(destroy_window=True)
+        self._tree_hover = False
+        self._schedule_preview_hide()
 
     def _schedule_preview(self) -> None:
-        self._cancel_preview(destroy_window=True)
+        self._cancel_preview(destroy_window=True, force=True)
         if not self._hover_item or not self.asset_store:
             return
         if "part" not in self.tree.item(self._hover_item, "tags"):
             return
         self._preview_after = self.after(1000, self._show_preview)
 
-    def _cancel_preview(self, destroy_window: bool = False) -> None:
+    def _schedule_preview_hide(self) -> None:
+        self._cancel_preview_hide_timer()
+        self._preview_hide_after = self.after(120, self._maybe_close_preview)
+
+    def _maybe_close_preview(self) -> None:
+        self._preview_hide_after = None
+        if not self._tree_hover and not self._preview_hover:
+            self._cancel_preview(destroy_window=True, force=True)
+
+    def _cancel_preview_hide_timer(self) -> None:
+        if self._preview_hide_after:
+            try:
+                self.after_cancel(self._preview_hide_after)
+            except Exception:
+                pass
+            self._preview_hide_after = None
+
+    def _cancel_preview(self, destroy_window: bool = False, force: bool = False) -> None:
         if self._preview_after:
             try:
                 self.after_cancel(self._preview_after)
             except Exception:
                 pass
             self._preview_after = None
+        self._cancel_preview_hide_timer()
         if destroy_window and self._preview_window:
-            try:
-                self._preview_window.destroy()
-            except Exception:
-                pass
-            self._preview_window = None
-            self._preview_photo = None
+            if force or not self._preview_hover:
+                try:
+                    self._preview_window.destroy()
+                except Exception:
+                    pass
+                self._preview_window = None
+                self._preview_photo = None
+                self._preview_hover = False
+
+    def _on_preview_enter(self, _event=None) -> None:
+        self._preview_hover = True
+        self._cancel_preview_hide_timer()
+
+    def _on_preview_leave(self, _event=None) -> None:
+        self._preview_hover = False
+        self._schedule_preview_hide()
 
     def _show_preview(self) -> None:
         if not self._hover_item or not self.asset_store:
@@ -967,9 +1052,13 @@ class SystemPartViewer(Frame):
         has_links = bool(asset.remote_links or asset.local_paths or asset.model_file)
         if not has_image and not has_links:
             return
-        self._cancel_preview(destroy_window=True)
+        self._cancel_preview(destroy_window=True, force=True)
         self._preview_window = Toplevel(self)
         self._preview_window.wm_overrideredirect(True)
+        self._preview_window.bind("<Enter>", self._on_preview_enter)
+        self._preview_window.bind("<Leave>", self._on_preview_leave)
+        self._preview_window.bind("<FocusIn>", self._on_preview_enter)
+        self._preview_window.bind("<FocusOut>", self._on_preview_leave)
         if self._hover_coords:
             x, y = self._hover_coords
             self._preview_window.geometry(f"440x540+{x + 20}+{y + 20}")
@@ -1193,15 +1282,18 @@ class InvalidPartEditor:
         path: Path,
         *,
         part_lookup: Callable[[str], str] | None = None,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         self.path = path
         self.part_lookup = part_lookup
+        self.on_close = on_close
         self.entries: list[InvalidPartEntry] = []
         self.selected_index: int | None = None
         self.filter_var = StringVar()
         self._suspend_events = False
         self.top = Toplevel(master)
         self.top.title("失效料号库编辑")
+        self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
         self._build_ui()
         self._load_entries()
 
@@ -1278,7 +1370,7 @@ class InvalidPartEditor:
         button_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
         Button(button_frame, text="保存", command=self._save_entries).pack(side=LEFT)
         Button(button_frame, text="重新载入", command=self._reload_entries).pack(side=LEFT, padx=5)
-        Button(button_frame, text="关闭", command=self.top.destroy).pack(side=RIGHT)
+        Button(button_frame, text="关闭", command=self._handle_close).pack(side=RIGHT)
 
     def _handle_paste_shortcut(self, _event) -> str:
         self._paste_entries()
@@ -1729,6 +1821,14 @@ class InvalidPartEditor:
         self._load_entries()
         messagebox.showinfo("完成", "失效料号已重新加载。")
 
+    def _handle_close(self) -> None:
+        if self.on_close:
+            try:
+                self.on_close()
+            except Exception:
+                pass
+        self.top.destroy()
+
 
 class BlockedApplicantEditor:
     def __init__(
@@ -1811,11 +1911,14 @@ class BindingEditor:
         binding_library: BindingLibrary,
         *,
         part_lookup: Callable[[str], str] | None = None,
+        on_close: Callable[[], None] | None = None,
     ):
         self.binding_library = binding_library
         self.part_lookup = part_lookup
+        self.on_close = on_close
         self.top = Toplevel(master)
         self.top.title("绑定料号编辑")
+        self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
         self.projects: list[BindingProject] = []
         self.selected_project_index: int | None = None
         self.selected_group_index: int | None = None
@@ -1976,6 +2079,7 @@ class BindingEditor:
         Button(button_frame, text="重新载入", command=self._load_data).pack(side=LEFT, padx=5)
         Button(button_frame, text="导入Excel", command=self._import_excel).pack(side=LEFT, padx=5)
         Button(button_frame, text="导出Excel", command=self._export_excel).pack(side=LEFT, padx=5)
+        Button(button_frame, text="关闭", command=self._handle_close).pack(side=RIGHT)
 
     def _on_project_index_change(self, *_args) -> None:
         if self._suspend_part_lookup:
@@ -2481,17 +2585,34 @@ class BindingEditor:
             return
         messagebox.showinfo("完成", "保存成功")
 
+    def _handle_close(self) -> None:
+        if self.on_close:
+            try:
+                self.on_close()
+            except Exception:
+                pass
+        self.top.destroy()
+
 
 class PartAssetManager:
-    def __init__(self, master, store: PartAssetStore, *, part_lookup: Callable[[str], str] | None = None):
+    def __init__(
+        self,
+        master,
+        store: PartAssetStore,
+        *,
+        part_lookup: Callable[[str], str] | None = None,
+        on_close: Callable[[], None] | None = None,
+    ):
         self.store = store
         self.part_lookup = part_lookup or (lambda _p: "")
+        self.on_close = on_close
         self.selected_part: str | None = None
         self.current_asset: PartAsset | None = None
 
         self.top = Toplevel(master)
         self.top.title("料号资源维护")
         self.top.geometry("980x640")
+        self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
 
         self.part_var = StringVar()
         self.desc_var = StringVar()
@@ -2524,8 +2645,14 @@ class PartAssetManager:
         form = Frame(right)
         form.pack(fill=BOTH, expand=True)
         Label(form, text="料号：").grid(row=0, column=0, sticky="e")
-        Entry(form, textvariable=self.part_var, width=28).grid(row=0, column=1, sticky="w")
-        Label(form, textvariable=self.desc_var, anchor="w").grid(row=0, column=2, sticky="w", padx=6)
+        Entry(form, textvariable=self.part_var, width=28).grid(row=0, column=1, sticky="we")
+        Label(
+            form,
+            textvariable=self.desc_var,
+            anchor="w",
+            wraplength=420,
+            justify="left",
+        ).grid(row=0, column=2, columnspan=2, sticky="w", padx=6)
 
         Label(form, text="模型文件：").grid(row=1, column=0, sticky="e", pady=(8, 0))
         Entry(form, textvariable=self.model_var, width=40, state="readonly").grid(row=1, column=1, sticky="w", pady=(8, 0))
@@ -2546,12 +2673,18 @@ class PartAssetManager:
         img_frame = Frame(form)
         img_frame.grid(row=3, column=1, sticky="w", pady=(8, 0))
         self.image_list = Listbox(img_frame, width=50, height=10)
-        self.image_list.pack(side=LEFT, fill=BOTH)
+        self.image_list.pack(side=LEFT, fill=BOTH, expand=True)
         img_btns = Frame(form)
         img_btns.grid(row=3, column=2, sticky="nw", padx=6, pady=(8, 0))
         Button(img_btns, text="添加图片", command=self._add_images).pack(fill=BOTH)
         Button(img_btns, text="删除选中", command=self._remove_image).pack(fill=BOTH, pady=4)
         Button(img_btns, text="打开选中", command=self._open_image).pack(fill=BOTH)
+        Button(img_btns, text="上移", command=lambda: self._move_image(-1)).pack(
+            fill=BOTH, pady=(6, 2)
+        )
+        Button(img_btns, text="下移", command=lambda: self._move_image(1)).pack(
+            fill=BOTH
+        )
         dl_frame = Frame(form)
         dl_frame.grid(row=4, column=1, sticky="w", pady=(8, 0))
         Entry(dl_frame, textvariable=self.url_var, width=46).pack(side=LEFT)
@@ -2564,7 +2697,7 @@ class PartAssetManager:
         action_bar = Frame(right)
         action_bar.pack(fill=BOTH, pady=10)
         Button(action_bar, text="保存资源", command=self._save_asset).pack(side=LEFT)
-        Button(action_bar, text="关闭", command=self.top.destroy).pack(side=LEFT, padx=6)
+        Button(action_bar, text="关闭", command=self._handle_close).pack(side=LEFT, padx=6)
 
         for idx in range(4):
             form.columnconfigure(idx, weight=1)
@@ -2677,6 +2810,19 @@ class PartAssetManager:
             asset.images = existing
             self.store.upsert(asset)
 
+    def _move_image(self, step: int) -> None:
+        selection = self.image_list.curselection()
+        if not selection:
+            return
+        idx = selection[0]
+        new_idx = idx + step
+        if new_idx < 0 or new_idx >= self.image_list.size():
+            return
+        value = self.image_list.get(idx)
+        self.image_list.delete(idx)
+        self.image_list.insert(new_idx, value)
+        self.image_list.selection_set(new_idx)
+
     def _open_image(self) -> None:
         selection = self.image_list.curselection()
         if not selection:
@@ -2748,16 +2894,32 @@ class PartAssetManager:
         self.part_var.set(normalized)
         return normalized
 
+    def _handle_close(self) -> None:
+        if self.on_close:
+            try:
+                self.on_close()
+            except Exception:
+                pass
+        self.top.destroy()
+
 
 def _split_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
 class ImportantMaterialEditor:
-    def __init__(self, master, path: Path):
+    def __init__(
+        self,
+        master,
+        path: Path,
+        *,
+        on_close: Callable[[], None] | None = None,
+    ):
         self.path = path
+        self.on_close = on_close
         self.top = Toplevel(master)
         self.top.title("重要物料编辑")
+        self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
         self._build_ui()
         self._load_content()
 
@@ -2781,7 +2943,7 @@ class ImportantMaterialEditor:
         button_frame.pack(fill=BOTH, padx=10, pady=(0, 10))
         Button(button_frame, text="保存", command=self._save_content).pack(side=LEFT)
         Button(button_frame, text="重新加载", command=self._load_content).pack(side=LEFT, padx=5)
-        Button(button_frame, text="关闭", command=self.top.destroy).pack(side=RIGHT)
+        Button(button_frame, text="关闭", command=self._handle_close).pack(side=RIGHT)
 
     def _load_content(self) -> None:
         try:
@@ -2805,6 +2967,14 @@ class ImportantMaterialEditor:
             messagebox.showerror("保存失败", f"写入重要物料失败：{exc}")
         else:
             messagebox.showinfo("保存成功", f"重要物料已保存到：{self.path}")
+
+    def _handle_close(self) -> None:
+        if self.on_close:
+            try:
+                self.on_close()
+            except Exception:
+                pass
+        self.top.destroy()
 
 
 def main() -> None:
