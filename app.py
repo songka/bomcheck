@@ -993,16 +993,26 @@ class SystemPartViewer(Frame):
         self._schedule_preview_hide()
 
     def _schedule_preview(self) -> None:
-        self._cancel_preview(destroy_window=True, force=True)
+        if self._preview_after:
+            try:
+                self.after_cancel(self._preview_after)
+            except Exception:
+                pass
+            self._preview_after = None
+
         if not self._hover_item or not self.asset_store:
+            self._schedule_preview_hide()
             return
         if "part" not in self.tree.item(self._hover_item, "tags"):
+            self._schedule_preview_hide()
             return
+
+        self._cancel_preview(destroy_window=True, force=True)
         self._preview_after = self.after(1000, self._show_preview)
 
     def _schedule_preview_hide(self) -> None:
         self._cancel_preview_hide_timer()
-        self._preview_hide_after = self.after(350, self._maybe_close_preview)
+        self._preview_hide_after = self.after(500, self._maybe_close_preview)
 
     def _maybe_close_preview(self) -> None:
         self._preview_hide_after = None
@@ -1062,7 +1072,12 @@ class SystemPartViewer(Frame):
         if not asset:
             return
         has_image = bool(asset.images)
-        has_links = bool(asset.remote_links or asset.local_paths or asset.model_file)
+        model_path: Path | None = None
+        if asset.model_file:
+            candidate = self.asset_store.resolve_path(asset.model_file)
+            if candidate.exists():
+                model_path = candidate
+        has_links = bool(asset.remote_links or asset.local_paths or model_path)
         if not has_image and not has_links:
             return
         self._cancel_preview(destroy_window=True, force=True)
@@ -1109,11 +1124,10 @@ class SystemPartViewer(Frame):
                 ).pack(anchor="w", padx=8)
                 self._start_slideshow()
 
-        if asset.model_file or asset.local_paths or asset.remote_links:
+        if model_path or asset.local_paths or asset.remote_links:
             info = Frame(container, bg="white")
             info.pack(fill=BOTH, padx=8, pady=4)
-            if asset.model_file:
-                model_path = self.asset_store.resolve_path(asset.model_file)
+            if model_path:
                 Button(
                     info,
                     text="打开3D文件",
