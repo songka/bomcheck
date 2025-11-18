@@ -747,6 +747,10 @@ class SystemPartViewer(Frame):
         self._preview_after: str | None = None
         self._preview_window: Toplevel | None = None
         self._preview_photo: ImageTk.PhotoImage | None = None
+        self._preview_image_label: Label | None = None
+        self._preview_slideshow_after: str | None = None
+        self._preview_asset: PartAsset | None = None
+        self._preview_image_index: int = 0
         self._preview_hide_after: str | None = None
         self._tree_hover = False
         self._preview_hover = False
@@ -989,16 +993,26 @@ class SystemPartViewer(Frame):
         self._schedule_preview_hide()
 
     def _schedule_preview(self) -> None:
-        self._cancel_preview(destroy_window=True, force=True)
+        if self._preview_after:
+            try:
+                self.after_cancel(self._preview_after)
+            except Exception:
+                pass
+            self._preview_after = None
+
         if not self._hover_item or not self.asset_store:
+            self._schedule_preview_hide()
             return
         if "part" not in self.tree.item(self._hover_item, "tags"):
+            self._schedule_preview_hide()
             return
+
+        self._cancel_preview(destroy_window=True, force=True)
         self._preview_after = self.after(1000, self._show_preview)
 
     def _schedule_preview_hide(self) -> None:
         self._cancel_preview_hide_timer()
-        self._preview_hide_after = self.after(350, self._maybe_close_preview)
+        self._preview_hide_after = self.after(500, self._maybe_close_preview)
 
     def _maybe_close_preview(self) -> None:
         self._preview_hide_after = None
@@ -1029,6 +1043,15 @@ class SystemPartViewer(Frame):
                     pass
                 self._preview_window = None
                 self._preview_photo = None
+                self._preview_image_label = None
+                self._preview_asset = None
+                self._preview_image_index = 0
+                if self._preview_slideshow_after:
+                    try:
+                        self.after_cancel(self._preview_slideshow_after)
+                    except Exception:
+                        pass
+                    self._preview_slideshow_after = None
                 self._preview_hover = False
 
     def _on_preview_enter(self, _event=None) -> None:
@@ -1057,8 +1080,6 @@ class SystemPartViewer(Frame):
         self._preview_window.wm_overrideredirect(True)
         self._preview_window.bind("<Enter>", self._on_preview_enter)
         self._preview_window.bind("<Leave>", self._on_preview_leave)
-        self._preview_window.bind("<FocusIn>", self._on_preview_enter)
-        self._preview_window.bind("<FocusOut>", self._on_preview_leave)
         if self._hover_coords:
             x, y = self._hover_coords
             self._preview_window.geometry(f"440x540+{x + 20}+{y + 20}")
@@ -1077,11 +1098,14 @@ class SystemPartViewer(Frame):
 
         if asset.images:
             try:
+                self._preview_asset = asset
+                self._preview_image_index = 0
                 image = self.asset_store.load_image_preview(asset.images[0])
                 self._preview_photo = ImageTk.PhotoImage(image)
-                Label(container, image=self._preview_photo, bg="white").pack(
-                    padx=8, pady=4
+                self._preview_image_label = Label(
+                    container, image=self._preview_photo, bg="white"
                 )
+                self._preview_image_label.pack(padx=8, pady=4)
             except Exception:
                 Label(container, text="图片预览失败", bg="white", fg="red").pack(
                     fill=BOTH, padx=8, pady=4
@@ -1093,6 +1117,7 @@ class SystemPartViewer(Frame):
                     bg="white",
                     fg="#555",
                 ).pack(anchor="w", padx=8)
+                self._start_slideshow()
 
         if asset.model_file or asset.local_paths or asset.remote_links:
             info = Frame(container, bg="white")
@@ -1118,6 +1143,34 @@ class SystemPartViewer(Frame):
                     command=lambda url=link: webbrowser.open(url),
                     anchor="w",
                 ).pack(fill=BOTH, anchor="w")
+
+    def _start_slideshow(self) -> None:
+        if not self._preview_asset or not self._preview_asset.images:
+            return
+        if self._preview_slideshow_after:
+            try:
+                self.after_cancel(self._preview_slideshow_after)
+            except Exception:
+                pass
+        self._preview_slideshow_after = self.after(2500, self._show_next_image)
+
+    def _show_next_image(self) -> None:
+        self._preview_slideshow_after = None
+        if not self._preview_window or not self._preview_asset:
+            return
+        images = self._preview_asset.images
+        if len(images) <= 1:
+            return
+        self._preview_image_index = (self._preview_image_index + 1) % len(images)
+        next_path = images[self._preview_image_index]
+        try:
+            image = self.asset_store.load_image_preview(next_path)
+            self._preview_photo = ImageTk.PhotoImage(image)
+            if self._preview_image_label:
+                self._preview_image_label.config(image=self._preview_photo)
+        except Exception:
+            pass
+        self._start_slideshow()
 
     def _insert_nodes(self, parent: str, node: Dict[str, Dict], depth: int = 1) -> None:
         for category, child in self._iter_collapsed_children(node, depth):
