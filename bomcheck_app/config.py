@@ -13,6 +13,7 @@ DEFAULT_CONFIG = {
     "important_materials": "重要物料.txt",
     "system_part_db": "系统料号.xlsx",
     "blocked_applicants": "屏蔽申请人.txt",
+    "part_asset_dir": "料号资源",
 }
 
 
@@ -23,6 +24,7 @@ class AppConfig:
     important_materials: Path
     system_part_db: Path
     blocked_applicants: Path
+    part_asset_dir: Path
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], base_dir: Path) -> "AppConfig":
@@ -32,6 +34,10 @@ class AppConfig:
             important_materials=_resolve_path(data.get("important_materials"), base_dir),
             system_part_db=_resolve_path(data.get("system_part_db"), base_dir),
             blocked_applicants=_resolve_path(data.get("blocked_applicants"), base_dir),
+            part_asset_dir=_resolve_path(
+                data.get("part_asset_dir") or DEFAULT_CONFIG["part_asset_dir"],
+                base_dir,
+            ),
         )
 
     def to_dict(self, base_dir: Path) -> Dict[str, str]:
@@ -41,6 +47,7 @@ class AppConfig:
             "important_materials": _to_relative(self.important_materials, base_dir),
             "system_part_db": _to_relative(self.system_part_db, base_dir),
             "blocked_applicants": _to_relative(self.blocked_applicants, base_dir),
+            "part_asset_dir": _to_relative(self.part_asset_dir, base_dir),
         }
 
 

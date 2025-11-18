@@ -1,2 +1,4 @@
 openpyxl
 opencc-python-reimplemented
+Pillow
+requests
