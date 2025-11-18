@@ -32,7 +32,7 @@ from tkinter import ttk
 
 import csv
 from openpyxl import Workbook, load_workbook
-from PIL import ImageTk
+from PIL import Image, ImageTk
 
 from bomcheck_app.binding_library import BindingChoice, BindingGroup, BindingLibrary, BindingProject
 from bomcheck_app.config import AppConfig, load_config, save_config
@@ -754,6 +754,9 @@ class SystemPartViewer(Frame):
         self._preview_hide_after: str | None = None
         self._tree_hover = False
         self._preview_hover = False
+        self._preview_base_image: Image.Image | None = None
+        self._preview_zoom: float = 1.0
+        self._preview_image_frame: Frame | None = None
         self._build_ui()
         self.update_path(path)
 
@@ -1007,7 +1010,6 @@ class SystemPartViewer(Frame):
             self._schedule_preview_hide()
             return
 
-        self._cancel_preview(destroy_window=True, force=True)
         self._preview_after = self.after(1000, self._show_preview)
 
     def _schedule_preview_hide(self) -> None:
@@ -1044,8 +1046,11 @@ class SystemPartViewer(Frame):
                 self._preview_window = None
                 self._preview_photo = None
                 self._preview_image_label = None
+                self._preview_image_frame = None
                 self._preview_asset = None
                 self._preview_image_index = 0
+                self._preview_base_image = None
+                self._preview_zoom = 1.0
                 if self._preview_slideshow_after:
                     try:
                         self.after_cancel(self._preview_slideshow_after)
@@ -1057,9 +1062,11 @@ class SystemPartViewer(Frame):
     def _on_preview_enter(self, _event=None) -> None:
         self._preview_hover = True
         self._cancel_preview_hide_timer()
+        self._pause_slideshow()
 
     def _on_preview_leave(self, _event=None) -> None:
         self._preview_hover = False
+        self._resume_slideshow()
         self._schedule_preview_hide()
 
     def _show_preview(self) -> None:
@@ -1105,24 +1112,60 @@ class SystemPartViewer(Frame):
             try:
                 self._preview_asset = asset
                 self._preview_image_index = 0
-                image = self.asset_store.load_image_preview(asset.images[0])
-                self._preview_photo = ImageTk.PhotoImage(image)
-                self._preview_image_label = Label(
-                    container, image=self._preview_photo, bg="white"
+                self._preview_zoom = 1.0
+                self._preview_image_frame = Frame(
+                    container, bg="white", width=420, height=320
                 )
-                self._preview_image_label.pack(padx=8, pady=4)
+                self._preview_image_frame.pack(padx=8, pady=4)
+                self._preview_image_frame.pack_propagate(False)
+                self._preview_image_label = Label(
+                    self._preview_image_frame, bg="white"
+                )
+                self._preview_image_label.place(relx=0.5, rely=0.5, anchor="center")
+                self._load_preview_image(asset.images[0])
             except Exception:
                 Label(container, text="图片预览失败", bg="white", fg="red").pack(
                     fill=BOTH, padx=8, pady=4
                 )
+            controls = Frame(container, bg="white")
+            controls.pack(fill=BOTH, padx=8)
+            prev_btn = Button(
+                controls,
+                text="◀",  # noqa: RUF001 - user-visible arrow
+                width=4,
+                command=self._show_previous_image,
+            )
+            prev_btn.pack(side=LEFT)
+            next_btn = Button(
+                controls,
+                text="▶",  # noqa: RUF001 - user-visible arrow
+                width=4,
+                command=self._show_next_image_manual,
+            )
+            next_btn.pack(side=LEFT, padx=(4, 8))
+            Button(
+                controls,
+                text="缩小",
+                width=6,
+                command=lambda: self._zoom_image(-0.2),
+            ).pack(side=LEFT)
+            Button(
+                controls,
+                text="放大",
+                width=6,
+                command=lambda: self._zoom_image(0.2),
+            ).pack(side=LEFT, padx=4)
             if len(asset.images) > 1:
                 Label(
-                    container,
+                    controls,
                     text=f"共 {len(asset.images)} 张图片，鼠标右键可在资源维护中切换",  # hint
                     bg="white",
                     fg="#555",
-                ).pack(anchor="w", padx=8)
+                ).pack(side=LEFT, padx=(8, 0))
                 self._start_slideshow()
+            else:
+                prev_btn.config(state="disabled")
+                next_btn.config(state="disabled")
 
         if model_path or asset.local_paths or asset.remote_links:
             info = Frame(container, bg="white")
@@ -1151,12 +1194,55 @@ class SystemPartViewer(Frame):
     def _start_slideshow(self) -> None:
         if not self._preview_asset or not self._preview_asset.images:
             return
+        if self._preview_hover:
+            return
         if self._preview_slideshow_after:
             try:
                 self.after_cancel(self._preview_slideshow_after)
             except Exception:
                 pass
         self._preview_slideshow_after = self.after(2500, self._show_next_image)
+
+    def _pause_slideshow(self) -> None:
+        if self._preview_slideshow_after:
+            try:
+                self.after_cancel(self._preview_slideshow_after)
+            except Exception:
+                pass
+            self._preview_slideshow_after = None
+
+    def _resume_slideshow(self) -> None:
+        if self._preview_hover:
+            return
+        if self._preview_asset and self._preview_asset.images and len(self._preview_asset.images) > 1:
+            self._start_slideshow()
+
+    def _load_preview_image(self, relative_path: str) -> None:
+        try:
+            self._preview_base_image = self.asset_store.load_image_preview(
+                relative_path, max_size=(800, 800)
+            )
+            self._render_preview_image()
+        except Exception:
+            pass
+
+    def _render_preview_image(self) -> None:
+        if not self._preview_base_image:
+            return
+        if not self._preview_image_label:
+            return
+        zoom = max(0.4, min(self._preview_zoom, 3.0))
+        self._preview_zoom = zoom
+        target_width = int(self._preview_base_image.width * zoom)
+        target_height = int(self._preview_base_image.height * zoom)
+        try:
+            resized = self._preview_base_image.resize(
+                (max(1, target_width), max(1, target_height)), Image.LANCZOS
+            )
+            self._preview_photo = ImageTk.PhotoImage(resized)
+            self._preview_image_label.config(image=self._preview_photo)
+        except Exception:
+            return
 
     def _show_next_image(self) -> None:
         self._preview_slideshow_after = None
@@ -1166,15 +1252,30 @@ class SystemPartViewer(Frame):
         if len(images) <= 1:
             return
         self._preview_image_index = (self._preview_image_index + 1) % len(images)
-        next_path = images[self._preview_image_index]
-        try:
-            image = self.asset_store.load_image_preview(next_path)
-            self._preview_photo = ImageTk.PhotoImage(image)
-            if self._preview_image_label:
-                self._preview_image_label.config(image=self._preview_photo)
-        except Exception:
-            pass
+        self._preview_zoom = 1.0
+        self._load_preview_image(images[self._preview_image_index])
         self._start_slideshow()
+
+    def _show_next_image_manual(self) -> None:
+        self._pause_slideshow()
+        self._show_next_image()
+
+    def _show_previous_image(self) -> None:
+        if not self._preview_asset or not self._preview_asset.images:
+            return
+        self._pause_slideshow()
+        images = self._preview_asset.images
+        if len(images) <= 1:
+            return
+        self._preview_image_index = (self._preview_image_index - 1) % len(images)
+        self._preview_zoom = 1.0
+        self._load_preview_image(images[self._preview_image_index])
+
+    def _zoom_image(self, delta: float) -> None:
+        if not self._preview_base_image:
+            return
+        self._preview_zoom += delta
+        self._render_preview_image()
 
     def _insert_nodes(self, parent: str, node: Dict[str, Dict], depth: int = 1) -> None:
         for category, child in self._iter_collapsed_children(node, depth):
