@@ -1153,31 +1153,39 @@ class SystemPartViewer(Frame):
                 )
                 self._preview_image_frame.bind("<Enter>", self._show_navigation)
                 self._preview_image_frame.bind("<Leave>", self._hide_navigation)
+                self._preview_image_frame.bind("<Left>", self._on_preview_key_previous)
+                self._preview_image_frame.bind("<Right>", self._on_preview_key_next)
                 self._nav_prev_btn = Button(
                     self._preview_image_frame,
                     text="◀",  # noqa: RUF001 - user-visible arrow
-                    width=3,
+                    width=4,
+                    height=2,
                     command=self._show_previous_image,
                     bg="#000",
                     fg="white",
-                    activebackground="#333",
+                    font=("TkDefaultFont", 16, "bold"),
+                    activebackground="#111",
                     activeforeground="white",
                     relief="flat",
                     bd=0,
                     highlightthickness=0,
+                    cursor="hand2",
                 )
                 self._nav_next_btn = Button(
                     self._preview_image_frame,
                     text="▶",  # noqa: RUF001 - user-visible arrow
-                    width=3,
+                    width=4,
+                    height=2,
                     command=self._show_next_image_manual,
                     bg="#000",
                     fg="white",
-                    activebackground="#333",
+                    font=("TkDefaultFont", 16, "bold"),
+                    activebackground="#111",
                     activeforeground="white",
                     relief="flat",
                     bd=0,
                     highlightthickness=0,
+                    cursor="hand2",
                 )
                 self._image_index_label = Label(
                     self._preview_image_frame,
@@ -1386,6 +1394,8 @@ class SystemPartViewer(Frame):
 
     def _show_navigation(self, _event=None) -> None:
         self._navigation_visible = True
+        if self._preview_image_frame:
+            self._preview_image_frame.focus_set()
         self._update_navigation_visibility(show_controls=True)
 
     def _hide_navigation(self, _event=None) -> None:
@@ -1418,9 +1428,17 @@ class SystemPartViewer(Frame):
 
         total = len(self._preview_asset.images)
         if self._preview_image_index > 0:
-            self._nav_prev_btn.place(relx=0.04, rely=0.5, anchor="w")
+            self._nav_prev_btn.place(relx=0.03, rely=0.5, anchor="w")
         if self._preview_image_index < total - 1:
-            self._nav_next_btn.place(relx=0.96, rely=0.5, anchor="e")
+            self._nav_next_btn.place(relx=0.97, rely=0.5, anchor="e")
+
+    def _on_preview_key_next(self, _event=None) -> str:
+        self._show_next_image_manual()
+        return "break"
+
+    def _on_preview_key_previous(self, _event=None) -> str:
+        self._show_previous_image()
+        return "break"
 
     def _position_preview_window(self) -> None:
         if not self._preview_window or not self._hover_coords:
