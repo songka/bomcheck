@@ -757,7 +757,15 @@ class SystemPartViewer(Frame):
         self._preview_base_image: Image.Image | None = None
         self._preview_zoom: float = 1.0
         self._preview_image_frame: Frame | None = None
+        self._nav_prev_btn: Button | None = None
+        self._nav_next_btn: Button | None = None
+        self._image_index_label: Label | None = None
         self._preview_frame_size = (440, 540)
+        self._preview_render_size: tuple[int, int] | None = None
+        self._preview_image_offset: tuple[int, int] = (0, 0)
+        self._drag_start: tuple[int, int] | None = None
+        self._active_preview_item: str | None = None
+        self._navigation_visible = False
         self._build_ui()
         self.update_path(path)
 
@@ -1053,6 +1061,14 @@ class SystemPartViewer(Frame):
                 self._preview_image_index = 0
                 self._preview_base_image = None
                 self._preview_zoom = 1.0
+                self._nav_prev_btn = None
+                self._nav_next_btn = None
+                self._image_index_label = None
+                self._preview_render_size = None
+                self._preview_image_offset = (0, 0)
+                self._drag_start = None
+                self._active_preview_item = None
+                self._navigation_visible = False
                 if self._preview_slideshow_after:
                     try:
                         self.after_cancel(self._preview_slideshow_after)
@@ -1098,6 +1114,7 @@ class SystemPartViewer(Frame):
         self._preview_window.bind("<Control-Button-4>", self._on_preview_mousewheel)
         self._preview_window.bind("<Control-Button-5>", self._on_preview_mousewheel)
         self._position_preview_window()
+        self._active_preview_item = self._hover_item
 
         container = Frame(self._preview_window, bg="white", bd=1, relief="solid")
         container.pack(fill=BOTH, expand=True)
@@ -1125,50 +1142,61 @@ class SystemPartViewer(Frame):
                     self._preview_image_frame, bg="white"
                 )
                 self._preview_image_label.place(relx=0.5, rely=0.5, anchor="center")
+                self._preview_image_label.bind(
+                    "<ButtonPress-1>", self._start_drag_image
+                )
+                self._preview_image_label.bind(
+                    "<B1-Motion>", self._drag_image
+                )
+                self._preview_image_label.bind(
+                    "<ButtonRelease-1>", self._stop_drag_image
+                )
+                self._preview_image_frame.bind("<Enter>", self._show_navigation)
+                self._preview_image_frame.bind("<Leave>", self._hide_navigation)
+                self._nav_prev_btn = Button(
+                    self._preview_image_frame,
+                    text="◀",  # noqa: RUF001 - user-visible arrow
+                    width=3,
+                    command=self._show_previous_image,
+                    bg="#000",
+                    fg="white",
+                    activebackground="#333",
+                    activeforeground="white",
+                    relief="flat",
+                    bd=0,
+                    highlightthickness=0,
+                )
+                self._nav_next_btn = Button(
+                    self._preview_image_frame,
+                    text="▶",  # noqa: RUF001 - user-visible arrow
+                    width=3,
+                    command=self._show_next_image_manual,
+                    bg="#000",
+                    fg="white",
+                    activebackground="#333",
+                    activeforeground="white",
+                    relief="flat",
+                    bd=0,
+                    highlightthickness=0,
+                )
+                self._image_index_label = Label(
+                    self._preview_image_frame,
+                    text="",
+                    bg="#000",
+                    fg="white",
+                    bd=0,
+                    padx=6,
+                    pady=2,
+                    font=("TkDefaultFont", 9, "bold"),
+                )
+                self._update_navigation_visibility()
                 self._load_preview_image(asset.images[0])
             except Exception:
                 Label(container, text="图片预览失败", bg="white", fg="red").pack(
                     fill=BOTH, padx=8, pady=4
                 )
-            controls = Frame(container, bg="white")
-            controls.pack(fill=BOTH, padx=8)
-            prev_btn = Button(
-                controls,
-                text="◀",  # noqa: RUF001 - user-visible arrow
-                width=4,
-                command=self._show_previous_image,
-            )
-            prev_btn.pack(side=LEFT)
-            next_btn = Button(
-                controls,
-                text="▶",  # noqa: RUF001 - user-visible arrow
-                width=4,
-                command=self._show_next_image_manual,
-            )
-            next_btn.pack(side=LEFT, padx=(4, 8))
-            Button(
-                controls,
-                text="缩小",
-                width=6,
-                command=lambda: self._zoom_image(-0.2),
-            ).pack(side=LEFT)
-            Button(
-                controls,
-                text="放大",
-                width=6,
-                command=lambda: self._zoom_image(0.2),
-            ).pack(side=LEFT, padx=4)
             if len(asset.images) > 1:
-                Label(
-                    controls,
-                    text=f"共 {len(asset.images)} 张图片，鼠标右键可在资源维护中切换",  # hint
-                    bg="white",
-                    fg="#555",
-                ).pack(side=LEFT, padx=(8, 0))
                 self._start_slideshow()
-            else:
-                prev_btn.config(state="disabled")
-                next_btn.config(state="disabled")
 
         if model_path or asset.local_paths or asset.remote_links:
             info = Frame(container, bg="white")
@@ -1226,7 +1254,10 @@ class SystemPartViewer(Frame):
                 relative_path, max_size=(800, 800)
             )
             self._preview_zoom = self._calculate_fit_zoom()
+            self._preview_render_size = None
+            self._preview_image_offset = (0, 0)
             self._render_preview_image()
+            self._update_navigation_visibility()
         except Exception:
             pass
 
@@ -1245,6 +1276,8 @@ class SystemPartViewer(Frame):
             )
             self._preview_photo = ImageTk.PhotoImage(resized)
             self._preview_image_label.config(image=self._preview_photo)
+            self._preview_render_size = resized.size
+            self._update_image_position()
         except Exception:
             return
 
@@ -1257,6 +1290,7 @@ class SystemPartViewer(Frame):
             return
         self._preview_image_index = (self._preview_image_index + 1) % len(images)
         self._preview_zoom = 1.0
+        self._preview_image_offset = (0, 0)
         self._load_preview_image(images[self._preview_image_index])
         self._start_slideshow()
 
@@ -1273,6 +1307,7 @@ class SystemPartViewer(Frame):
             return
         self._preview_image_index = (self._preview_image_index - 1) % len(images)
         self._preview_zoom = 1.0
+        self._preview_image_offset = (0, 0)
         self._load_preview_image(images[self._preview_image_index])
 
     def _zoom_image(self, delta: float) -> None:
@@ -1306,29 +1341,125 @@ class SystemPartViewer(Frame):
         scale = min(frame_width / self._preview_base_image.width, frame_height / self._preview_base_image.height)
         return max(0.1, min(1.0, scale))
 
+    def _constrain_offset(self, offset: tuple[int, int]) -> tuple[int, int]:
+        if not self._preview_render_size:
+            return offset
+        if not self._preview_image_frame:
+            return offset
+        frame_width = self._preview_image_frame.winfo_width() or self._preview_image_frame.winfo_reqwidth() or 420
+        frame_height = self._preview_image_frame.winfo_height() or self._preview_image_frame.winfo_reqheight() or 320
+        img_w, img_h = self._preview_render_size
+        max_x = max(0, (img_w - frame_width) // 2)
+        max_y = max(0, (img_h - frame_height) // 2)
+        constrained_x = max(-max_x, min(max_x, offset[0]))
+        constrained_y = max(-max_y, min(max_y, offset[1]))
+        return constrained_x, constrained_y
+
+    def _update_image_position(self) -> None:
+        if not self._preview_image_label or not self._preview_image_frame:
+            return
+        self._preview_image_offset = self._constrain_offset(self._preview_image_offset)
+        self._preview_image_label.place_configure(
+            relx=0.5,
+            rely=0.5,
+            anchor="center",
+            x=self._preview_image_offset[0],
+            y=self._preview_image_offset[1],
+        )
+
+    def _start_drag_image(self, event) -> None:
+        self._drag_start = (event.x_root, event.y_root)
+
+    def _drag_image(self, event) -> None:
+        if not self._drag_start:
+            return
+        dx = event.x_root - self._drag_start[0]
+        dy = event.y_root - self._drag_start[1]
+        self._drag_start = (event.x_root, event.y_root)
+        offset_x = self._preview_image_offset[0] + dx
+        offset_y = self._preview_image_offset[1] + dy
+        self._preview_image_offset = self._constrain_offset((offset_x, offset_y))
+        self._update_image_position()
+
+    def _stop_drag_image(self, _event=None) -> None:
+        self._drag_start = None
+
+    def _show_navigation(self, _event=None) -> None:
+        self._navigation_visible = True
+        self._update_navigation_visibility(show_controls=True)
+
+    def _hide_navigation(self, _event=None) -> None:
+        self._navigation_visible = False
+        self._update_navigation_visibility(show_controls=False)
+
+    def _update_navigation_visibility(self, show_controls: bool | None = None) -> None:
+        if show_controls is not None:
+            self._navigation_visible = show_controls
+        if self._image_index_label and self._preview_asset and self._preview_asset.images:
+            total = len(self._preview_asset.images)
+            current = self._preview_image_index + 1
+            self._image_index_label.config(text=f"{current}/{total}")
+            self._image_index_label.place(relx=0.95, rely=0.05, anchor="ne")
+        elif self._image_index_label:
+            self._image_index_label.place_forget()
+
+        if not self._nav_prev_btn or not self._nav_next_btn:
+            return
+        for button in (self._nav_prev_btn, self._nav_next_btn):
+            button.place_forget()
+
+        if (
+            not self._preview_asset
+            or not self._preview_asset.images
+            or len(self._preview_asset.images) <= 1
+            or not self._navigation_visible
+        ):
+            return
+
+        total = len(self._preview_asset.images)
+        if self._preview_image_index > 0:
+            self._nav_prev_btn.place(relx=0.04, rely=0.5, anchor="w")
+        if self._preview_image_index < total - 1:
+            self._nav_next_btn.place(relx=0.96, rely=0.5, anchor="e")
+
     def _position_preview_window(self) -> None:
         if not self._preview_window or not self._hover_coords:
             return
         width, height = self._preview_frame_size
         offset = 20
         x, y = self._hover_coords
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
+        screen_w = self.winfo_vrootwidth()
+        screen_h = self.winfo_vrootheight()
+        origin_x = self.winfo_vrootx()
+        origin_y = self.winfo_vrooty()
 
         pos_x = x + offset
-        if pos_x + width > screen_w:
+        if pos_x + width > origin_x + screen_w:
             pos_x = x - width - offset
-            pos_x = max(0, min(pos_x, screen_w - width))
+            pos_x = max(origin_x, min(pos_x, origin_x + screen_w - width))
 
         pos_y = y + offset
-        if pos_y + height > screen_h:
+        if pos_y + height > origin_y + screen_h:
             pos_y = y - height - offset
-            pos_y = max(0, min(pos_y, screen_h - height))
+            pos_y = max(origin_y, min(pos_y, origin_y + screen_h - height))
 
         self._preview_window.geometry(f"{width}x{height}+{int(pos_x)}+{int(pos_y)}")
 
     def _on_tree_click(self, _event=None) -> None:
-        self._cancel_preview(destroy_window=True, force=True)
+        if not _event:
+            return
+        item = self.tree.identify_row(_event.y)
+        if item:
+            self._tree_hover = True
+            self._hover_item = item
+            self._hover_coords = (_event.x_root, _event.y_root)
+            if self._preview_window and self._active_preview_item == item:
+                self._cancel_preview_hide_timer()
+                return
+            self._cancel_preview(destroy_window=True, force=True)
+            self._schedule_preview()
+        else:
+            self._cancel_preview(destroy_window=True, force=True)
 
     def _insert_nodes(self, parent: str, node: Dict[str, Dict], depth: int = 1) -> None:
         for category, child in self._iter_collapsed_children(node, depth):
