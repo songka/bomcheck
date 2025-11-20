@@ -20,6 +20,7 @@ from tkinter import (
     Entry,
     Frame,
     Label,
+    LabelFrame,
     Listbox,
     Menu,
     Scrollbar,
@@ -3657,9 +3658,11 @@ class PartAssetManager:
                 pass
 
     def focus_part(self, part_no: str) -> None:
-        self.search_var.set(part_no)
+        normalized = normalize_part_no(part_no) or part_no
+        self.search_var.set("")
+        self.selected_part = normalized
         self._load_assets()
-        self._select_part(part_no)
+        self._select_part(normalized)
         try:
             self.top.deiconify()
             self.top.lift()
