@@ -119,14 +119,13 @@ class AssetCrawler:
         self.store.upsert(asset)
 
         updates: list[str] = []
-        if not asset.remote_links:
-            official = self._search_official_site(part_no)
-            if official:
-                updated_links = list(asset.remote_links)
-                if official not in updated_links:
-                    updated_links.append(official)
-                    self.store.set_remote_links(part_no, updated_links)
-                    updates.append("官网链接")
+        official = self._search_official_site(part_no)
+        if official:
+            updated_links = list(asset.remote_links)
+            if official not in updated_links:
+                updated_links.append(official)
+                self.store.set_remote_links(part_no, updated_links)
+                updates.append("官网链接")
 
         if not asset.images:
             image_path = self.store.download_first_image_from_search(
@@ -148,11 +147,17 @@ class AssetCrawler:
         )
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
+        normalized = (normalize_part_no(keyword) or keyword).lower()
+        fallback: Optional[str] = None
         for link in soup.select("li.b_algo h2 a, ol#b_results h2 a"):
             href = link.get("href")
-            if href and self._is_http_url(href):
+            if not href or not self._is_http_url(href):
+                continue
+            if normalized in href.lower():
                 return href
-        return None
+            if fallback is None:
+                fallback = href
+        return fallback
 
     def _is_http_url(self, url: str) -> bool:
         parsed = urlparse(url)
