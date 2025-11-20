@@ -106,6 +106,14 @@ class AssetCrawler:
             if self.delay_seconds:
                 time.sleep(self.delay_seconds)
 
+    def statuses(self) -> List[CrawlStatus]:
+        return sorted(self._tasks.values(), key=lambda item: item.part_no)
+
+    def summary(self) -> tuple[int, int]:
+        total = len(self._tasks)
+        done = len([t for t in self._tasks.values() if t.status == "done"])
+        return done, total
+
     def _process_part(self, part_no: str) -> str:
         asset = self.store.get(part_no) or PartAsset(part_no=part_no)
         self.store.upsert(asset)
