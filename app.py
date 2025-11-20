@@ -504,6 +504,7 @@ class Application:
             self.root,
             self.part_asset_store,
             part_lookup=self._lookup_system_part_desc,
+            system_part_provider=self._get_system_part_repository,
             on_close=lambda: setattr(self, "part_asset_manager", None),
         )
         self.part_asset_manager.update_permission(self._is_allowed("asset"))
@@ -3359,10 +3360,12 @@ class PartAssetManager:
         store: PartAssetStore,
         *,
         part_lookup: Callable[[str], str] | None = None,
+        system_part_provider: Callable[[], SystemPartRepository | None] | None = None,
         on_close: Callable[[], None] | None = None,
     ):
         self.store = store
         self.part_lookup = part_lookup or (lambda _p: "")
+        self._system_part_provider = system_part_provider
         self.on_close = on_close
         self.selected_part: str | None = None
         self.current_asset: PartAsset | None = None
@@ -3372,6 +3375,7 @@ class PartAssetManager:
         self.crawler = AssetCrawler(store.root)
         self._crawl_thread: threading.Thread | None = None
         self._crawl_error: Exception | None = None
+        self._crawl_status_index: list[str] = []
         self._can_manage = True
         self._managed_buttons: list[Button] = []
         self._managed_texts: list[Text] = []
@@ -3534,10 +3538,17 @@ class PartAssetManager:
         crawl_scroll = Scrollbar(status_container)
         crawl_scroll.pack(side=RIGHT, fill=Y)
         self.crawl_status_list = Listbox(
-            status_container, height=8, yscrollcommand=crawl_scroll.set
+            status_container,
+            height=8,
+            yscrollcommand=crawl_scroll.set,
+            selectmode="extended",
         )
         self.crawl_status_list.pack(side=LEFT, fill=BOTH, expand=True)
         crawl_scroll.config(command=self.crawl_status_list.yview)
+        self.crawl_status_list.bind("<Button-3>", self._show_crawl_menu)
+        self._crawl_menu = Menu(self.top, tearoff=False)
+        self._crawl_menu.add_command(label="删除选中", command=self._remove_selected_tasks)
+        self._crawl_menu.add_command(label="清空进度", command=self._clear_all_tasks)
 
         for idx in range(5):
             form.columnconfigure(idx, weight=1)
@@ -3826,12 +3837,18 @@ class PartAssetManager:
         self._add_crawl_tasks(parts, "尚未维护任何料号。")
 
     def _queue_missing_assets(self) -> None:
-        parts = [
-            asset.part_no
-            for asset in self.store.list_assets()
-            if not asset.images and not asset.remote_links
-        ]
-        self._add_crawl_tasks(parts, "没有需要补充资料的料号。")
+        repository = self._system_part_provider() if self._system_part_provider else None
+        if not repository:
+            messagebox.showerror("缺少配置", "请先在数据文件设置中配置系统料号文件。")
+            return
+        existing_assets = {asset.part_no for asset in self.store.list_assets()}
+        missing_parts = []
+        for record in repository.records:
+            normalized = normalize_part_no(record.part_no)
+            if not normalized or normalized in existing_assets:
+                continue
+            missing_parts.append(normalized)
+        self._add_crawl_tasks(missing_parts, "系统料号中没有未维护的料号。")
 
     def _add_crawl_tasks(self, part_numbers: list[str], empty_message: str) -> None:
         if not self._ensure_manageable():
@@ -3857,6 +3874,7 @@ class PartAssetManager:
         self.crawl_progress_var.set(f"进度：{done}/{total}")
         if hasattr(self, "crawl_status_list"):
             self.crawl_status_list.delete(0, END)
+            self._crawl_status_index = []
             for item in statuses:
                 prefix = {
                     "done": "✅",
@@ -3864,7 +3882,46 @@ class PartAssetManager:
                     "pending": "⏳",
                 }.get(item.status, "•")
                 message = f"{prefix} {item.part_no} {item.message}".strip()
+                self._crawl_status_index.append(item.part_no)
                 self.crawl_status_list.insert(END, message)
+
+    def _show_crawl_menu(self, event) -> None:
+        try:
+            index = self.crawl_status_list.nearest(event.y)
+            if index >= 0 and index not in self.crawl_status_list.curselection():
+                self.crawl_status_list.selection_clear(0, END)
+                self.crawl_status_list.selection_set(index)
+            self._crawl_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._crawl_menu.grab_release()
+
+    def _remove_selected_tasks(self) -> None:
+        if not self._ensure_manageable():
+            return
+        selections = self.crawl_status_list.curselection()
+        if not selections:
+            return
+        part_nos = [
+            self._crawl_status_index[idx]
+            for idx in selections
+            if idx < len(self._crawl_status_index)
+        ]
+        if not part_nos:
+            return
+        if not messagebox.askyesno("确认", "删除选中的生成任务进度？"):
+            return
+        self.crawler.remove_tasks(part_nos)
+        self._refresh_crawl_status()
+
+    def _clear_all_tasks(self) -> None:
+        if not self._ensure_manageable():
+            return
+        if not self._crawl_status_index:
+            return
+        if not messagebox.askyesno("确认", "清空所有生成任务的进度记录？"):
+            return
+        self.crawler.clear()
+        self._refresh_crawl_status()
 
     def _start_crawl(self) -> None:
         if not self._ensure_manageable():

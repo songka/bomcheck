@@ -84,6 +84,22 @@ class AssetCrawler:
             self._tasks.setdefault(normalized, CrawlStatus(part_no=normalized))
         self._save_progress()
 
+    def remove_tasks(self, part_numbers: Iterable[str]) -> None:
+        removed = False
+        for part in part_numbers:
+            normalized = normalize_part_no(part)
+            if normalized and normalized in self._tasks:
+                del self._tasks[normalized]
+                removed = True
+        if removed:
+            self._save_progress()
+
+    def clear(self) -> None:
+        if not self._tasks:
+            return
+        self._tasks = {}
+        self._save_progress()
+
     def pending(self) -> List[str]:
         return [p for p, task in self._tasks.items() if task.status != "done"]
 
