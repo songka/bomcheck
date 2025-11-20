@@ -20,6 +20,7 @@ from tkinter import (
     Entry,
     Frame,
     Label,
+    LabelFrame,
     Listbox,
     Menu,
     Scrollbar,
@@ -90,7 +91,7 @@ class Application:
         self._build_ui()
         self._refresh_config_entry()
         self._refresh_controlled_buttons()
-        self._prompt_login(initial=True)
+        self._refresh_context_permissions()
 
     def _build_ui(self) -> None:
         notebook = ttk.Notebook(self.root)
@@ -271,6 +272,7 @@ class Application:
 
     def _prompt_login(self, initial: bool = False) -> None:
         dialog = LoginDialog(self.root, self.account_store)
+        self.root.wait_window(dialog.top)
         account = dialog.result
         if account:
             self.current_user = account
@@ -479,6 +481,8 @@ class Application:
         if not self.blocked_applicant_path:
             messagebox.showerror("缺少配置", "请先在数据文件设置中配置屏蔽申请人列表。")
             return
+        if self._reuse_window(self.blocked_editor):
+            return
         self.blocked_editor = BlockedApplicantEditor(
             self.root,
             self.blocked_applicant_path,
@@ -492,6 +496,9 @@ class Application:
             messagebox.showerror("缺少配置", "请先在数据文件设置中配置料号资源目录。")
             return
         if self._reuse_window(self.part_asset_manager):
+            if self.part_asset_manager:
+                self.part_asset_manager.update_permission(self._is_allowed("asset"))
+                self.part_asset_manager.show_all_assets()
             return
         self.part_asset_manager = PartAssetManager(
             self.root,
@@ -500,6 +507,7 @@ class Application:
             on_close=lambda: setattr(self, "part_asset_manager", None),
         )
         self.part_asset_manager.update_permission(self._is_allowed("asset"))
+        self.part_asset_manager.show_all_assets()
 
     def _open_part_asset_manager_for_part(self, part_no: str) -> None:
         self._open_part_asset_manager()
@@ -3499,15 +3507,30 @@ class PartAssetManager:
         crawl_btn = Button(crawler_frame, text="开始生成", command=self._start_crawl)
         crawl_btn.grid(row=1, column=2, sticky="w")
         self._managed_buttons.append(crawl_btn)
+        queue_filter_btn = Button(
+            crawler_frame, text="加入搜索结果", command=self._queue_filtered_assets
+        )
+        queue_filter_btn.grid(row=1, column=3, sticky="w", padx=(6, 4))
+        self._managed_buttons.append(queue_filter_btn)
+        queue_all_btn = Button(
+            crawler_frame, text="加入全部已维护", command=self._queue_all_assets
+        )
+        queue_all_btn.grid(row=2, column=1, sticky="w", padx=(5, 6), pady=(4, 0))
+        self._managed_buttons.append(queue_all_btn)
+        queue_missing_btn = Button(
+            crawler_frame, text="加入无资料的料", command=self._queue_missing_assets
+        )
+        queue_missing_btn.grid(row=2, column=2, sticky="w", pady=(4, 0))
+        self._managed_buttons.append(queue_missing_btn)
         refresh_btn = Button(
             crawler_frame, text="刷新进度", command=self._refresh_crawl_status
         )
-        refresh_btn.grid(row=1, column=3, sticky="w", padx=(6, 4))
+        refresh_btn.grid(row=2, column=3, sticky="w", padx=(6, 4), pady=(4, 0))
         Label(crawler_frame, textvariable=self.crawl_progress_var, anchor="w").grid(
-            row=2, column=0, columnspan=4, sticky="w", padx=5
+            row=3, column=0, columnspan=4, sticky="w", padx=5
         )
         status_container = Frame(crawler_frame)
-        status_container.grid(row=3, column=0, columnspan=4, sticky="nsew", padx=5, pady=(4, 6))
+        status_container.grid(row=4, column=0, columnspan=4, sticky="nsew", padx=5, pady=(4, 6))
         crawl_scroll = Scrollbar(status_container)
         crawl_scroll.pack(side=RIGHT, fill=Y)
         self.crawl_status_list = Listbox(
@@ -3521,17 +3544,27 @@ class PartAssetManager:
         crawler_frame.columnconfigure(1, weight=1)
         crawler_frame.columnconfigure(2, weight=1)
         crawler_frame.columnconfigure(3, weight=1)
-        crawler_frame.rowconfigure(3, weight=1)
+        crawler_frame.rowconfigure(4, weight=1)
+
+    def show_all_assets(self) -> None:
+        self.search_var.set("")
+        self._load_assets()
+
+    def _filtered_assets(self) -> list[tuple[PartAsset, str]]:
+        query = self.search_var.get().strip().lower()
+        assets: list[tuple[PartAsset, str]] = []
+        for asset in self.store.list_assets():
+            desc = self.part_lookup(asset.part_no)
+            if query and query not in asset.part_no.lower() and query not in (desc or "").lower():
+                continue
+            assets.append((asset, desc))
+        return assets
 
     def _load_assets(self) -> None:
         self.asset_listbox.delete(0, END)
         self._asset_index: list[str] = []
-        query = self.search_var.get().strip().lower()
-        for asset in self.store.list_assets():
-            desc = self.part_lookup(asset.part_no)
+        for asset, desc in self._filtered_assets():
             display = f"{asset.part_no} - {desc}" if desc else asset.part_no
-            if query and query not in asset.part_no.lower() and query not in (desc or "").lower():
-                continue
             self._asset_index.append(asset.part_no)
             self.asset_listbox.insert(END, display)
         if self.selected_part:
@@ -3539,8 +3572,7 @@ class PartAssetManager:
         self._refresh_crawl_status()
 
     def _clear_asset_filter(self) -> None:
-        self.search_var.set("")
-        self._load_assets()
+        self.show_all_assets()
 
     def _select_part(self, part_no: str) -> None:
         if part_no in getattr(self, "_asset_index", []):
@@ -3626,9 +3658,11 @@ class PartAssetManager:
                 pass
 
     def focus_part(self, part_no: str) -> None:
-        self.search_var.set(part_no)
+        normalized = normalize_part_no(part_no) or part_no
+        self.search_var.set("")
+        self.selected_part = normalized
         self._load_assets()
-        self._select_part(part_no)
+        self._select_part(normalized)
         try:
             self.top.deiconify()
             self.top.lift()
@@ -3781,7 +3815,39 @@ class PartAssetManager:
         if not entries:
             messagebox.showinfo("提示", "请先填写需要生成的料号列表。")
             return
-        self.crawler.add_tasks(entries)
+        self._add_crawl_tasks(entries, "请先填写需要生成的料号列表。")
+
+    def _queue_filtered_assets(self) -> None:
+        parts = [asset.part_no for asset, _desc in self._filtered_assets()]
+        self._add_crawl_tasks(parts, "没有匹配当前搜索条件的料号。")
+
+    def _queue_all_assets(self) -> None:
+        parts = [asset.part_no for asset in self.store.list_assets()]
+        self._add_crawl_tasks(parts, "尚未维护任何料号。")
+
+    def _queue_missing_assets(self) -> None:
+        parts = [
+            asset.part_no
+            for asset in self.store.list_assets()
+            if not asset.images and not asset.remote_links
+        ]
+        self._add_crawl_tasks(parts, "没有需要补充资料的料号。")
+
+    def _add_crawl_tasks(self, part_numbers: list[str], empty_message: str) -> None:
+        if not self._ensure_manageable():
+            return
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for part in part_numbers:
+            normalized_part = normalize_part_no(part)
+            if not normalized_part or normalized_part in seen:
+                continue
+            seen.add(normalized_part)
+            normalized.append(normalized_part)
+        if not normalized:
+            messagebox.showinfo("提示", empty_message)
+            return
+        self.crawler.add_tasks(normalized)
         self._refresh_crawl_status()
         messagebox.showinfo("已加入", "料号已加入生成队列，可随时开始生成。")
 
