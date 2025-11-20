@@ -2,3 +2,5 @@ openpyxl
 opencc-python-reimplemented
 Pillow
 requests
+
+beautifulsoup4

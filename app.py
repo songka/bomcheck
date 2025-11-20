@@ -14,7 +14,9 @@ from tkinter import (
     LEFT,
     RIGHT,
     Y,
+    BooleanVar,
     Button,
+    Checkbutton,
     Entry,
     Frame,
     Label,
@@ -34,6 +36,7 @@ import csv
 from openpyxl import Workbook, load_workbook
 from PIL import Image, ImageTk
 
+from bomcheck_app.auth import AccountStore, PERMISSION_LABELS, UserAccount
 from bomcheck_app.binding_library import BindingChoice, BindingGroup, BindingLibrary, BindingProject
 from bomcheck_app.config import AppConfig, load_config, save_config
 from bomcheck_app.excel_processor import (
@@ -44,6 +47,7 @@ from bomcheck_app.excel_processor import (
 )
 from bomcheck_app.models import ExecutionResult
 from bomcheck_app.part_assets import PartAsset, PartAssetStore, open_file
+from bomcheck_app.asset_crawler import AssetCrawler
 from bomcheck_app.system_parts import (
     SystemPartRecord,
     SystemPartRepository,
@@ -65,6 +69,8 @@ class Application:
         self.root = root
         self.root.title("料号检测系统")
         self.config_path: Path = CONFIG_PATH
+        self.account_store = AccountStore(self.config_path.parent / "accounts.json")
+        self.current_user: UserAccount | None = None
         self.system_part_path: Path | None = None
         self.blocked_applicant_path: Path | None = None
         self.system_part_repository: SystemPartRepository | None = None
@@ -83,6 +89,8 @@ class Application:
         self._execution_thread: threading.Thread | None = None
         self._build_ui()
         self._refresh_config_entry()
+        self._refresh_controlled_buttons()
+        self._prompt_login(initial=True)
 
     def _build_ui(self) -> None:
         notebook = ttk.Notebook(self.root)
@@ -95,48 +103,87 @@ class Application:
         notebook.add(system_part_tab, text="料号查询")
         notebook.add(config_tab, text="配置")
 
+        self.user_var = StringVar(value="未登录")
+
         config_file_frame = Frame(config_tab)
         config_file_frame.pack(fill=BOTH, padx=10, pady=(10, 0))
 
         Label(config_file_frame, text="配置文件：").pack(side=LEFT)
         self.config_entry = Entry(config_file_frame, width=50, state="readonly")
         self.config_entry.pack(side=LEFT, padx=5)
-        Button(
+        self.edit_data_btn = Button(
             config_file_frame,
             text="编辑数据文件",
             command=self._open_data_file_editor,
-        ).pack(side=LEFT)
-        Button(
+        )
+        self.reload_config_btn = Button(
             config_file_frame, text="重新加载", command=self._reload_config
-        ).pack(side=LEFT, padx=5)
+        )
+        self.login_btn = Button(config_file_frame, text="登录", command=self._prompt_login)
+        self.logout_btn = Button(
+            config_file_frame, text="退出登录", command=self._logout, state="disabled"
+        )
+        self.user_label = Label(config_file_frame, textvariable=self.user_var, anchor="w")
+        self.user_label.pack(side=RIGHT, padx=(4, 0))
+        self.logout_btn.pack(side=RIGHT, padx=4)
+        self.login_btn.pack(side=RIGHT, padx=4)
+        self.reload_config_btn.pack(side=LEFT, padx=5)
+        self.edit_data_btn.pack(side=LEFT)
 
         config_action_frame = Frame(config_tab)
         config_action_frame.pack(fill=BOTH, padx=10, pady=10, anchor="w")
-        Button(
+        self._controlled_buttons: list[tuple[Button, str | None, dict]] = []
+        self._register_controlled_button(
+            Button(
+                config_action_frame,
+                text="编辑失效料号库",
+                command=self._open_invalid_part_editor,
+            ),
+            "invalid_part",
+            {"side": LEFT},
+        )
+        self._register_controlled_button(
+            Button(
+                config_action_frame,
+                text="编辑绑定料号",
+                command=self._open_binding_editor,
+            ),
+            "binding",
+            {"side": LEFT, "padx": 5},
+        )
+        self._register_controlled_button(
+            Button(
+                config_action_frame,
+                text="编辑重要物料",
+                command=self._open_important_material_editor,
+            ),
+            "important",
+            {"side": LEFT},
+        )
+        self._register_controlled_button(
+            Button(
+                config_action_frame,
+                text="编辑屏蔽申请人",
+                command=self._open_blocked_applicant_editor,
+            ),
+            "blocked",
+            {"side": LEFT, "padx": 5},
+        )
+        self._register_controlled_button(
+            Button(
+                config_action_frame,
+                text="维护料号资源",
+                command=self._open_part_asset_manager,
+            ),
+            "asset",
+            {"side": LEFT, "padx": 5},
+        )
+        self.admin_button = Button(
             config_action_frame,
-            text="编辑失效料号库",
-            command=self._open_invalid_part_editor,
-        ).pack(side=LEFT)
-        Button(
-            config_action_frame,
-            text="编辑绑定料号",
-            command=self._open_binding_editor,
-        ).pack(side=LEFT, padx=5)
-        Button(
-            config_action_frame,
-            text="编辑重要物料",
-            command=self._open_important_material_editor,
-        ).pack(side=LEFT)
-        Button(
-            config_action_frame,
-            text="编辑屏蔽申请人",
-            command=self._open_blocked_applicant_editor,
-        ).pack(side=LEFT, padx=5)
-        Button(
-            config_action_frame,
-            text="维护料号资源",
-            command=self._open_part_asset_manager,
-        ).pack(side=LEFT, padx=5)
+            text="管理员设置",
+            command=self._open_admin_settings,
+        )
+        self._register_controlled_button(self.admin_button, "admin", {"side": LEFT, "padx": 10})
 
         system_viewer_frame = Frame(system_part_tab)
         system_viewer_frame.pack(fill=BOTH, expand=True)
@@ -145,6 +192,7 @@ class Application:
             self.system_part_path,
             asset_store=self.part_asset_store,
             on_repository_update=self._set_system_part_repository,
+            on_request_asset_edit=self._open_part_asset_manager_for_part,
         )
         self.system_part_viewer.pack(fill=BOTH, expand=True)
 
@@ -176,6 +224,78 @@ class Application:
         self.result_text.pack(side=LEFT, fill=BOTH, expand=True)
         self.result_text.config(yscrollcommand=scrollbar.set)
         scrollbar.config(command=self.result_text.yview)
+
+    def _register_controlled_button(self, button: Button, permission: str | None, pack_kwargs: dict) -> None:
+        self._controlled_buttons.append((button, permission, pack_kwargs))
+
+    def _refresh_controlled_buttons(self) -> None:
+        for button, _perm, _opts in getattr(self, "_controlled_buttons", []):
+            try:
+                button.pack_forget()
+            except Exception:
+                pass
+        for button, permission, opts in getattr(self, "_controlled_buttons", []):
+            if self._is_allowed(permission):
+                button.pack(**opts)
+
+        if hasattr(self, "edit_data_btn"):
+            try:
+                self.edit_data_btn.pack_forget()
+            except Exception:
+                pass
+            if self._is_admin():
+                self.edit_data_btn.pack(side=LEFT)
+        if hasattr(self, "reload_config_btn"):
+            try:
+                self.reload_config_btn.pack_forget()
+            except Exception:
+                pass
+            if self._is_admin() or self.current_user:
+                self.reload_config_btn.pack(side=LEFT, padx=5)
+
+    def _is_admin(self) -> bool:
+        return bool(self.current_user and self.current_user.is_admin)
+
+    def _is_allowed(self, permission: str | None) -> bool:
+        if permission is None:
+            return True
+        if permission == "admin":
+            return self._is_admin()
+        return bool(self.current_user and self.current_user.can(permission))
+
+    def _ensure_permission(self, permission: str) -> bool:
+        if self._is_allowed(permission):
+            return True
+        messagebox.showerror("无权限", "当前账户没有执行此操作的权限")
+        return False
+
+    def _prompt_login(self, initial: bool = False) -> None:
+        dialog = LoginDialog(self.root, self.account_store)
+        account = dialog.result
+        if account:
+            self.current_user = account
+            self.user_var.set(f"当前用户：{account.username}{' (管理员)' if account.is_admin else ''}")
+            self.logout_btn.config(state="normal")
+            self.login_btn.config(state="disabled")
+        elif initial and not self.current_user:
+            self.user_var.set("未登录")
+            self.login_btn.config(state="normal")
+        self._refresh_controlled_buttons()
+        self._refresh_context_permissions()
+
+    def _logout(self) -> None:
+        self.current_user = None
+        self.user_var.set("未登录")
+        self.logout_btn.config(state="disabled")
+        self.login_btn.config(state="normal")
+        self._refresh_controlled_buttons()
+        self._refresh_context_permissions()
+
+    def _refresh_context_permissions(self) -> None:
+        if hasattr(self, "system_part_viewer") and self.system_part_viewer:
+            self.system_part_viewer.update_asset_permission(self._is_allowed("asset"))
+        if self.part_asset_manager:
+            self.part_asset_manager.update_permission(self._is_allowed("asset"))
 
     def _apply_config(self, path: Path) -> None:
         config = load_config(path)
@@ -215,6 +335,8 @@ class Application:
             messagebox.showinfo("配置已更新", f"已重新加载：{self.config_path}")
 
     def _open_data_file_editor(self) -> None:
+        if not self._ensure_permission("admin"):
+            return
         if self._reuse_window(self.data_file_editor):
             return
         self.data_file_editor = DataFileEditor(
@@ -317,6 +439,8 @@ class Application:
         decision_event.wait()
 
     def _open_binding_editor(self) -> None:
+        if not self._ensure_permission("binding"):
+            return
         if self._reuse_window(self.binding_editor):
             return
         self.binding_editor = BindingEditor(
@@ -327,6 +451,8 @@ class Application:
         )
 
     def _open_invalid_part_editor(self) -> None:
+        if not self._ensure_permission("invalid_part"):
+            return
         if self._reuse_window(self.invalid_part_editor):
             return
         self.invalid_part_editor = InvalidPartEditor(
@@ -337,6 +463,8 @@ class Application:
         )
 
     def _open_important_material_editor(self) -> None:
+        if not self._ensure_permission("important"):
+            return
         if self._reuse_window(self.important_editor):
             return
         self.important_editor = ImportantMaterialEditor(
@@ -346,6 +474,8 @@ class Application:
         )
 
     def _open_blocked_applicant_editor(self) -> None:
+        if not self._ensure_permission("blocked"):
+            return
         if not self.blocked_applicant_path:
             messagebox.showerror("缺少配置", "请先在数据文件设置中配置屏蔽申请人列表。")
             return
@@ -356,6 +486,8 @@ class Application:
         )
 
     def _open_part_asset_manager(self) -> None:
+        if not self._ensure_permission("asset"):
+            return
         if not self.part_asset_store:
             messagebox.showerror("缺少配置", "请先在数据文件设置中配置料号资源目录。")
             return
@@ -367,6 +499,17 @@ class Application:
             part_lookup=self._lookup_system_part_desc,
             on_close=lambda: setattr(self, "part_asset_manager", None),
         )
+        self.part_asset_manager.update_permission(self._is_allowed("asset"))
+
+    def _open_part_asset_manager_for_part(self, part_no: str) -> None:
+        self._open_part_asset_manager()
+        if self.part_asset_manager and part_no:
+            self.part_asset_manager.focus_part(part_no)
+
+    def _open_admin_settings(self) -> None:
+        if not self._ensure_permission("admin"):
+            return
+        AdminSettingsDialog(self.root, self.account_store, on_updated=self._refresh_controlled_buttons)
 
     def _lookup_system_part_desc(self, part_no: str) -> str:
         repository = self._get_system_part_repository()
@@ -734,6 +877,7 @@ class SystemPartViewer(Frame):
         *,
         asset_store: PartAssetStore | None = None,
         on_repository_update: Callable[[SystemPartRepository | None], None] | None = None,
+        on_request_asset_edit: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(master)
         self.path: Path | None = path
@@ -742,6 +886,7 @@ class SystemPartViewer(Frame):
         self.search_var = StringVar()
         self.status_var = StringVar()
         self.on_repository_update = on_repository_update
+        self.on_request_asset_edit = on_request_asset_edit
         self._hover_item: str | None = None
         self._hover_coords: tuple[int, int] | None = None
         self._preview_after: str | None = None
@@ -766,6 +911,8 @@ class SystemPartViewer(Frame):
         self._drag_start: tuple[int, int] | None = None
         self._active_preview_item: str | None = None
         self._navigation_visible = False
+        self._nav_overlay: Frame | None = None
+        self._can_manage_assets = False
         self._build_ui()
         self.update_path(path)
 
@@ -801,6 +948,10 @@ class SystemPartViewer(Frame):
     def update_asset_store(self, store: PartAssetStore | None) -> None:
         self.asset_store = store
         self._cancel_preview(destroy_window=True)
+
+    def update_asset_permission(self, allowed: bool) -> None:
+        self._can_manage_assets = allowed
+        self._rebuild_context_menu()
 
     def _build_ui(self) -> None:
         main_frame = Frame(self)
@@ -855,19 +1006,7 @@ class SystemPartViewer(Frame):
         self.tree.tag_configure("category-level-4", background="#f0fbf0")
         self.tree.tag_configure("part", background="white")
 
-        self.context_menu = Menu(self.tree, tearoff=0)
-        self.context_menu.add_command(
-            label="复制整行",
-            command=lambda: self._copy_selection("row"),
-        )
-        self.context_menu.add_command(
-            label="复制料号",
-            command=lambda: self._copy_selection("part"),
-        )
-        self.context_menu.add_command(
-            label="复制描述",
-            command=lambda: self._copy_selection("description"),
-        )
+        self._rebuild_context_menu()
         self.tree.bind("<Button-3>", self._on_tree_right_click)
         self.tree.bind("<Control-c>", lambda _event: self._copy_selection("row"))
         self.tree.bind("<Command-c>", lambda _event: self._copy_selection("row"))
@@ -881,6 +1020,39 @@ class SystemPartViewer(Frame):
         Label(status_frame, textvariable=self.status_var, anchor="w").pack(
             side=LEFT, fill=BOTH, expand=True
         )
+
+    def _rebuild_context_menu(self) -> None:
+        self.context_menu = Menu(self.tree, tearoff=0)
+        self.context_menu.add_command(
+            label="复制整行",
+            command=lambda: self._copy_selection("row"),
+        )
+        self.context_menu.add_command(
+            label="复制料号",
+            command=lambda: self._copy_selection("part"),
+        )
+        self.context_menu.add_command(
+            label="复制描述",
+            command=lambda: self._copy_selection("description"),
+        )
+        if self._can_manage_assets:
+            self.context_menu.add_separator()
+            self.context_menu.add_command(
+                label="维护料号资源",
+                command=self._maintain_selected_asset,
+            )
+
+    def _maintain_selected_asset(self) -> None:
+        if not self.on_request_asset_edit:
+            return
+        selection = self.tree.selection()
+        if not selection:
+            return
+        item = selection[0]
+        if "part" not in self.tree.item(item, "tags"):
+            return
+        part_no = self.tree.item(item, "text")
+        self.on_request_asset_edit(part_no)
 
     def _perform_search(self) -> None:
         self._refresh_tree()
@@ -1057,6 +1229,7 @@ class SystemPartViewer(Frame):
                 self._preview_photo = None
                 self._preview_image_label = None
                 self._preview_image_frame = None
+                self._nav_overlay = None
                 self._preview_asset = None
                 self._preview_image_index = 0
                 self._preview_base_image = None
@@ -1138,8 +1311,10 @@ class SystemPartViewer(Frame):
                 )
                 self._preview_image_frame.pack(padx=8, pady=4)
                 self._preview_image_frame.pack_propagate(False)
+                self._nav_overlay = Frame(self._preview_image_frame, bg="", width=420, height=320)
+                self._nav_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
                 self._preview_image_label = Label(
-                    self._preview_image_frame, bg="white"
+                    self._nav_overlay, bg="white"
                 )
                 self._preview_image_label.place(relx=0.5, rely=0.5, anchor="center")
                 self._preview_image_label.bind(
@@ -1151,12 +1326,12 @@ class SystemPartViewer(Frame):
                 self._preview_image_label.bind(
                     "<ButtonRelease-1>", self._stop_drag_image
                 )
-                self._preview_image_frame.bind("<Enter>", self._show_navigation)
-                self._preview_image_frame.bind("<Leave>", self._hide_navigation)
-                self._preview_image_frame.bind("<Left>", self._on_preview_key_previous)
-                self._preview_image_frame.bind("<Right>", self._on_preview_key_next)
+                self._nav_overlay.bind("<Enter>", self._show_navigation)
+                self._nav_overlay.bind("<Leave>", self._hide_navigation)
+                self._nav_overlay.bind("<Left>", self._on_preview_key_previous)
+                self._nav_overlay.bind("<Right>", self._on_preview_key_next)
                 self._nav_prev_btn = Button(
-                    self._preview_image_frame,
+                    self._nav_overlay,
                     text="◀",  # noqa: RUF001 - user-visible arrow
                     width=4,
                     height=2,
@@ -1172,7 +1347,7 @@ class SystemPartViewer(Frame):
                     cursor="hand2",
                 )
                 self._nav_next_btn = Button(
-                    self._preview_image_frame,
+                    self._nav_overlay,
                     text="▶",  # noqa: RUF001 - user-visible arrow
                     width=4,
                     height=2,
@@ -1394,8 +1569,8 @@ class SystemPartViewer(Frame):
 
     def _show_navigation(self, _event=None) -> None:
         self._navigation_visible = True
-        if self._preview_image_frame:
-            self._preview_image_frame.focus_set()
+        if self._nav_overlay:
+            self._nav_overlay.focus_set()
         self._update_navigation_visibility(show_controls=True)
 
     def _hide_navigation(self, _event=None) -> None:
@@ -2190,6 +2365,221 @@ class InvalidPartEditor:
         self.top.destroy()
 
 
+class LoginDialog:
+    def __init__(self, master, store: AccountStore):
+        self.store = store
+        self.result: UserAccount | None = None
+        self.top = Toplevel(master)
+        self.top.title("登录")
+        self.top.transient(master)
+        self.top.grab_set()
+        self.top.resizable(False, False)
+        self.username_var = StringVar()
+        self.password_var = StringVar()
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        frame = Frame(self.top)
+        frame.pack(fill=BOTH, expand=True, padx=12, pady=12)
+        Label(frame, text="用户名：").grid(row=0, column=0, sticky="e", pady=4)
+        Entry(frame, textvariable=self.username_var, width=24).grid(
+            row=0, column=1, padx=6
+        )
+        Label(frame, text="密码：").grid(row=1, column=0, sticky="e", pady=4)
+        Entry(frame, textvariable=self.password_var, width=24, show="*").grid(
+            row=1, column=1, padx=6
+        )
+        btns = Frame(frame)
+        btns.grid(row=2, column=0, columnspan=2, pady=(8, 0))
+        Button(btns, text="登录", command=self._on_login).pack(side=LEFT, padx=4)
+        Button(btns, text="取消", command=self.top.destroy).pack(side=LEFT, padx=4)
+        for idx in range(2):
+            frame.columnconfigure(idx, weight=1)
+
+    def _on_login(self) -> None:
+        account = self.store.authenticate(
+            self.username_var.get().strip(), self.password_var.get()
+        )
+        if not account:
+            messagebox.showerror("登录失败", "用户名或密码错误")
+            return
+        self.result = account
+        self.top.destroy()
+
+
+class AdminSettingsDialog:
+    def __init__(
+        self,
+        master,
+        store: AccountStore,
+        *,
+        on_updated: Callable[[], None] | None = None,
+    ) -> None:
+        self.store = store
+        self.on_updated = on_updated
+        self.selected_user: UserAccount | None = None
+        self.top = Toplevel(master)
+        self.top.title("管理员设置")
+        self.top.geometry("560x420")
+        self.top.transient(master)
+        self.top.grab_set()
+        self.username_var = StringVar()
+        self.password_var = StringVar()
+        self.is_admin_var = BooleanVar()
+        self.permission_vars: dict[str, BooleanVar] = {
+            key: BooleanVar() for key in PERMISSION_LABELS
+        }
+        self.permission_checks: list[Checkbutton] = []
+        self._build_ui()
+        self._load_users()
+
+    def _build_ui(self) -> None:
+        main = Frame(self.top)
+        main.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        left = Frame(main)
+        left.pack(side=LEFT, fill=Y)
+        Label(left, text="账户列表").pack(anchor="w")
+        list_container = Frame(left)
+        list_container.pack(fill=BOTH, expand=True)
+        scroll = Scrollbar(list_container)
+        scroll.pack(side=RIGHT, fill=Y)
+        self.user_list = Listbox(list_container, width=18, yscrollcommand=scroll.set)
+        self.user_list.pack(side=LEFT, fill=Y, expand=True)
+        scroll.config(command=self.user_list.yview)
+        self.user_list.bind("<<ListboxSelect>>", self._on_select_user)
+        action_btns = Frame(left)
+        action_btns.pack(fill=BOTH, pady=6)
+        Button(action_btns, text="新增/保存", command=self._save_user).pack(side=LEFT)
+        Button(action_btns, text="删除", command=self._delete_user).pack(side=LEFT, padx=4)
+        Button(action_btns, text="清空", command=self._clear_form).pack(side=LEFT)
+
+        right = Frame(main)
+        right.pack(side=LEFT, fill=BOTH, expand=True, padx=(10, 0))
+        form = Frame(right)
+        form.pack(fill=BOTH, expand=True)
+        Label(form, text="用户名：").grid(row=0, column=0, sticky="e")
+        Entry(form, textvariable=self.username_var, width=22).grid(
+            row=0, column=1, sticky="w", pady=4
+        )
+        Label(form, text="密码：").grid(row=1, column=0, sticky="e")
+        Entry(form, textvariable=self.password_var, width=22, show="*").grid(
+            row=1, column=1, sticky="w", pady=4
+        )
+        Checkbutton(
+            form,
+            text="管理员（拥有全部权限）",
+            variable=self.is_admin_var,
+            command=self._sync_permission_state,
+        ).grid(row=2, column=1, sticky="w", pady=(6, 4))
+        Label(form, text="功能权限：").grid(row=3, column=0, sticky="ne")
+        perm_frame = Frame(form)
+        perm_frame.grid(row=3, column=1, sticky="nw")
+        for idx, (key, label) in enumerate(PERMISSION_LABELS.items()):
+            chk = Checkbutton(
+                perm_frame,
+                text=label,
+                variable=self.permission_vars[key],
+                command=self._on_permission_toggle,
+            )
+            chk.grid(row=idx, column=0, sticky="w", pady=2)
+            self.permission_checks.append(chk)
+        for idx in range(2):
+            form.columnconfigure(idx, weight=1)
+
+    def _load_users(self) -> None:
+        self.user_list.delete(0, END)
+        for account in self.store.list_users():
+            label = f"{account.username}{' (管理员)' if account.is_admin else ''}"
+            self.user_list.insert(END, label)
+        self._clear_form()
+
+    def _on_select_user(self, _event=None) -> None:
+        selection = self.user_list.curselection()
+        if not selection:
+            return
+        username = self.user_list.get(selection[0]).split(" ")[0]
+        account = self.store.accounts.get(username)
+        if not account:
+            return
+        self.selected_user = account
+        self.username_var.set(account.username)
+        self.password_var.set("")
+        self.is_admin_var.set(account.is_admin)
+        for key, var in self.permission_vars.items():
+            var.set(account.is_admin or key in account.permissions)
+        self._sync_permission_state()
+
+    def _sync_permission_state(self) -> None:
+        if self.is_admin_var.get():
+            for var in self.permission_vars.values():
+                var.set(True)
+        state = "disabled" if self.is_admin_var.get() else "normal"
+        for chk in self.permission_checks:
+            try:
+                chk.config(state=state)
+            except Exception:
+                pass
+
+    def _on_permission_toggle(self) -> None:
+        self.is_admin_var.set(all(var.get() for var in self.permission_vars.values()))
+        self._sync_permission_state()
+
+    def _clear_form(self) -> None:
+        self.selected_user = None
+        self.username_var.set("")
+        self.password_var.set("")
+        self.is_admin_var.set(False)
+        for var in self.permission_vars.values():
+            var.set(False)
+        self._sync_permission_state()
+
+    def _save_user(self) -> None:
+        username = self.username_var.get().strip()
+        if not username:
+            messagebox.showerror("保存失败", "请填写用户名")
+            return
+        existing = self.store.accounts.get(username)
+        if existing:
+            account = UserAccount.from_dict(existing.to_dict())
+        else:
+            account = UserAccount.create(username, self.password_var.get() or "123456")
+        if self.password_var.get():
+            account.set_password(self.password_var.get())
+        account.is_admin = self.is_admin_var.get()
+        if account.is_admin:
+            account.permissions = set(PERMISSION_LABELS)
+        else:
+            account.permissions = {key for key, var in self.permission_vars.items() if var.get()}
+        self.store.upsert(account)
+        self._load_users()
+        if self.on_updated:
+            try:
+                self.on_updated()
+            except Exception:
+                pass
+        messagebox.showinfo("完成", "账户已保存")
+
+    def _delete_user(self) -> None:
+        selection = self.user_list.curselection()
+        if not selection:
+            return
+        username = self.user_list.get(selection[0]).split(" ")[0]
+        account = self.store.accounts.get(username)
+        if not account:
+            return
+        admins = [u for u in self.store.accounts.values() if u.is_admin]
+        if account.is_admin and len(admins) <= 1:
+            messagebox.showerror("无法删除", "至少需要保留一个管理员账户。")
+            return
+        if not messagebox.askyesno("确认", f"删除账户 {username}？"):
+            return
+        self.store.delete(username)
+        self._load_users()
+        if self.on_updated:
+            try:
+                self.on_updated()
+            except Exception:
+                pass
 class BlockedApplicantEditor:
     def __init__(
         self,
@@ -2968,6 +3358,15 @@ class PartAssetManager:
         self.on_close = on_close
         self.selected_part: str | None = None
         self.current_asset: PartAsset | None = None
+        self.search_var = StringVar()
+        self.crawl_progress_var = StringVar(value="进度：0/0")
+        self._image_preview_photo: ImageTk.PhotoImage | None = None
+        self.crawler = AssetCrawler(store.root)
+        self._crawl_thread: threading.Thread | None = None
+        self._crawl_error: Exception | None = None
+        self._can_manage = True
+        self._managed_buttons: list[Button] = []
+        self._managed_texts: list[Text] = []
 
         self.top = Toplevel(master)
         self.top.title("料号资源维护")
@@ -2990,13 +3389,31 @@ class PartAssetManager:
         left = Frame(main)
         left.pack(side=LEFT, fill=Y)
         Label(left, text="已配置料号").pack(anchor="w")
-        self.asset_listbox = Listbox(left, width=28)
-        self.asset_listbox.pack(fill=Y, expand=True)
+        search_frame = Frame(left)
+        search_frame.pack(fill=BOTH, pady=(4, 2))
+        Entry(search_frame, textvariable=self.search_var, width=18).pack(
+            side=LEFT, fill=BOTH, expand=True
+        )
+        Button(search_frame, text="搜索", command=self._load_assets).pack(side=LEFT, padx=4)
+        Button(search_frame, text="清除", command=self._clear_asset_filter).pack(side=LEFT)
+        list_container = Frame(left)
+        list_container.pack(fill=Y, expand=True)
+        asset_scroll = Scrollbar(list_container)
+        asset_scroll.pack(side=RIGHT, fill=Y)
+        self.asset_listbox = Listbox(
+            list_container, width=30, yscrollcommand=asset_scroll.set
+        )
+        self.asset_listbox.pack(side=LEFT, fill=Y, expand=True)
+        asset_scroll.config(command=self.asset_listbox.yview)
         self.asset_listbox.bind("<<ListboxSelect>>", self._on_asset_select)
         list_btns = Frame(left)
         list_btns.pack(fill=BOTH, pady=5)
-        Button(list_btns, text="新增", command=self._new_asset).pack(side=LEFT)
-        Button(list_btns, text="删除", command=self._delete_asset).pack(side=LEFT, padx=5)
+        add_btn = Button(list_btns, text="新增", command=self._new_asset)
+        add_btn.pack(side=LEFT)
+        self._managed_buttons.append(add_btn)
+        delete_btn = Button(list_btns, text="删除", command=self._delete_asset)
+        delete_btn.pack(side=LEFT, padx=5)
+        self._managed_buttons.append(delete_btn)
         Button(list_btns, text="刷新", command=self._load_assets).pack(side=LEFT)
 
         right = Frame(main)
@@ -3008,7 +3425,7 @@ class PartAssetManager:
         Entry(
             form,
             textvariable=self.part_var,
-            width=18,
+            width=14,
             validate="key",
             validatecommand=(self._part_validator, "%P"),
         ).grid(row=0, column=1, sticky="we")
@@ -3031,44 +3448,99 @@ class PartAssetManager:
         Label(form, text="本地地址（多行）：").grid(row=2, column=0, sticky="ne", pady=(8, 0))
         self.local_text = Text(form, height=3, width=40)
         self.local_text.grid(row=2, column=1, sticky="we", pady=(8, 0))
+        self._managed_texts.append(self.local_text)
         Label(form, text="网络地址（多行）：").grid(row=3, column=0, sticky="ne", pady=(8, 0))
         self.remote_text = Text(form, height=3, width=40)
         self.remote_text.grid(row=3, column=1, sticky="we", pady=(8, 0))
+        self._managed_texts.append(self.remote_text)
 
         Label(form, text="图片列表：").grid(row=4, column=0, sticky="ne", pady=(8, 0))
         img_frame = Frame(form)
-        img_frame.grid(row=4, column=1, sticky="w", pady=(8, 0))
+        img_frame.grid(row=4, column=1, sticky="nwe", pady=(8, 0))
         self.image_list = Listbox(img_frame, width=50, height=10)
         self.image_list.pack(side=LEFT, fill=BOTH, expand=True)
+        self.image_list.bind("<<ListboxSelect>>", lambda _e=None: self._preview_selected_image())
         img_btns = Frame(form)
         img_btns.grid(row=4, column=2, sticky="nw", padx=6, pady=(8, 0))
-        Button(img_btns, text="添加图片", command=self._add_images).pack(fill=BOTH)
-        Button(img_btns, text="删除选中", command=self._remove_image).pack(fill=BOTH, pady=4)
+        add_img_btn = Button(img_btns, text="添加图片", command=self._add_images)
+        add_img_btn.pack(fill=BOTH)
+        self._managed_buttons.append(add_img_btn)
+        del_img_btn = Button(img_btns, text="删除选中", command=self._remove_image)
+        del_img_btn.pack(fill=BOTH, pady=4)
+        self._managed_buttons.append(del_img_btn)
         Button(img_btns, text="打开选中", command=self._open_image).pack(fill=BOTH)
-        Button(img_btns, text="上移", command=lambda: self._move_image(-1)).pack(
-            fill=BOTH, pady=(6, 2)
+        up_btn = Button(img_btns, text="上移", command=lambda: self._move_image(-1))
+        up_btn.pack(fill=BOTH, pady=(6, 2))
+        self._managed_buttons.append(up_btn)
+        down_btn = Button(img_btns, text="下移", command=lambda: self._move_image(1))
+        down_btn.pack(fill=BOTH)
+        self._managed_buttons.append(down_btn)
+        preview_frame = Frame(form, bd=1, relief="sunken")
+        preview_frame.grid(row=4, column=3, sticky="nsew", padx=(6, 0), pady=(8, 0))
+        self.image_preview_label = Label(
+            preview_frame, text="选择图片预览", anchor="center", width=28, height=10, wraplength=240
         )
-        Button(img_btns, text="下移", command=lambda: self._move_image(1)).pack(
-            fill=BOTH
-        )
+        self.image_preview_label.pack(fill=BOTH, expand=True)
         action_bar = Frame(right)
         action_bar.pack(fill=BOTH, pady=10)
-        Button(action_bar, text="保存资源", command=self._save_asset).pack(side=LEFT)
+        save_btn = Button(action_bar, text="保存资源", command=self._save_asset)
+        save_btn.pack(side=LEFT)
+        self._managed_buttons.append(save_btn)
         Button(action_bar, text="关闭", command=self._handle_close).pack(side=LEFT, padx=6)
+        crawler_frame = LabelFrame(right, text="自动生成料号资源")
+        crawler_frame.pack(fill=BOTH, pady=(0, 5))
+        Label(crawler_frame, text="料号列表（每行一个）：").grid(row=0, column=0, sticky="nw")
+        self.crawl_queue = Text(crawler_frame, height=3, width=40)
+        self.crawl_queue.grid(row=0, column=1, columnspan=3, sticky="we", padx=5, pady=4)
+        self._managed_texts.append(self.crawl_queue)
+        queue_btn = Button(crawler_frame, text="加入队列", command=self._queue_crawl_tasks)
+        queue_btn.grid(row=1, column=1, sticky="w", padx=(5, 6))
+        self._managed_buttons.append(queue_btn)
+        crawl_btn = Button(crawler_frame, text="开始生成", command=self._start_crawl)
+        crawl_btn.grid(row=1, column=2, sticky="w")
+        self._managed_buttons.append(crawl_btn)
+        refresh_btn = Button(
+            crawler_frame, text="刷新进度", command=self._refresh_crawl_status
+        )
+        refresh_btn.grid(row=1, column=3, sticky="w", padx=(6, 4))
+        Label(crawler_frame, textvariable=self.crawl_progress_var, anchor="w").grid(
+            row=2, column=0, columnspan=4, sticky="w", padx=5
+        )
+        status_container = Frame(crawler_frame)
+        status_container.grid(row=3, column=0, columnspan=4, sticky="nsew", padx=5, pady=(4, 6))
+        crawl_scroll = Scrollbar(status_container)
+        crawl_scroll.pack(side=RIGHT, fill=Y)
+        self.crawl_status_list = Listbox(
+            status_container, height=8, yscrollcommand=crawl_scroll.set
+        )
+        self.crawl_status_list.pack(side=LEFT, fill=BOTH, expand=True)
+        crawl_scroll.config(command=self.crawl_status_list.yview)
 
-        for idx in range(4):
+        for idx in range(5):
             form.columnconfigure(idx, weight=1)
+        crawler_frame.columnconfigure(1, weight=1)
+        crawler_frame.columnconfigure(2, weight=1)
+        crawler_frame.columnconfigure(3, weight=1)
+        crawler_frame.rowconfigure(3, weight=1)
 
     def _load_assets(self) -> None:
         self.asset_listbox.delete(0, END)
         self._asset_index: list[str] = []
+        query = self.search_var.get().strip().lower()
         for asset in self.store.list_assets():
             desc = self.part_lookup(asset.part_no)
             display = f"{asset.part_no} - {desc}" if desc else asset.part_no
+            if query and query not in asset.part_no.lower() and query not in (desc or "").lower():
+                continue
             self._asset_index.append(asset.part_no)
             self.asset_listbox.insert(END, display)
         if self.selected_part:
             self._select_part(self.selected_part)
+        self._refresh_crawl_status()
+
+    def _clear_asset_filter(self) -> None:
+        self.search_var.set("")
+        self._load_assets()
 
     def _select_part(self, part_no: str) -> None:
         if part_no in getattr(self, "_asset_index", []):
@@ -3098,19 +3570,81 @@ class PartAssetManager:
         self.image_list.delete(0, END)
         for rel in asset.images if asset else []:
             self.image_list.insert(END, rel)
-        self.local_text.delete("1.0", END)
-        self.remote_text.delete("1.0", END)
-        if asset:
-            if asset.local_paths:
-                self.local_text.insert(END, "\n".join(asset.local_paths))
-            if asset.remote_links:
-                self.remote_text.insert(END, "\n".join(asset.remote_links))
+        if asset and asset.images:
+            self.image_list.selection_set(0)
+        self._set_text_content(self.local_text, "\n".join(asset.local_paths) if asset else "")
+        self._set_text_content(self.remote_text, "\n".join(asset.remote_links) if asset else "")
+        self._preview_selected_image()
+
+    def _set_text_content(self, widget: Text, content: str) -> None:
+        state = widget.cget("state")
+        widget.config(state="normal")
+        widget.delete("1.0", END)
+        if content:
+            widget.insert(END, content)
+        widget.config(state=state)
+
+    def _preview_selected_image(self) -> None:
+        selection = self.image_list.curselection()
+        if not selection:
+            self._clear_image_preview()
+            return
+        rel = self.image_list.get(selection[0])
+        try:
+            img = self.store.load_image_preview(rel, max_size=(260, 200))
+        except Exception:
+            self._clear_image_preview(error=True)
+            return
+        self._image_preview_photo = ImageTk.PhotoImage(img)
+        self.image_preview_label.config(image=self._image_preview_photo, text="")
+
+    def _clear_image_preview(self, error: bool = False) -> None:
+        self._image_preview_photo = None
+        self.image_preview_label.config(
+            image="",
+            text=("图片预览失败" if error else "选择图片预览"),
+        )
+
+    def _ensure_manageable(self) -> bool:
+        if self._can_manage:
+            return True
+        messagebox.showerror("无权限", "当前账户无权维护料号资源。")
+        return False
+
+    def update_permission(self, allowed: bool) -> None:
+        self._can_manage = allowed
+        state = "normal" if allowed else "disabled"
+        for btn in self._managed_buttons:
+            try:
+                btn.config(state=state)
+            except Exception:
+                pass
+        for txt in self._managed_texts:
+            try:
+                txt.config(state=state)
+            except Exception:
+                pass
+
+    def focus_part(self, part_no: str) -> None:
+        self.search_var.set(part_no)
+        self._load_assets()
+        self._select_part(part_no)
+        try:
+            self.top.deiconify()
+            self.top.lift()
+            self.top.focus_force()
+        except Exception:
+            pass
 
     def _new_asset(self) -> None:
+        if not self._ensure_manageable():
+            return
         self.asset_listbox.selection_clear(0, END)
         self._load_detail("")
 
     def _delete_asset(self) -> None:
+        if not self._ensure_manageable():
+            return
         selection = self.asset_listbox.curselection()
         if not selection:
             return
@@ -3123,6 +3657,8 @@ class PartAssetManager:
         self._load_detail("")
 
     def _save_asset(self) -> None:
+        if not self._ensure_manageable():
+            return
         part_no = self.part_var.get().strip()
         normalized = normalize_part_no(part_no)
         if not normalized:
@@ -3140,6 +3676,8 @@ class PartAssetManager:
         messagebox.showinfo("完成", "资源已保存")
 
     def _add_images(self) -> None:
+        if not self._ensure_manageable():
+            return
         part_no = self._require_part_no()
         if not part_no:
             return
@@ -3152,8 +3690,16 @@ class PartAssetManager:
         added = self.store.add_images(part_no, [Path(p) for p in file_paths])
         for rel in added:
             self.image_list.insert(END, rel)
+        if added:
+            last_index = self.image_list.size() - 1
+            if last_index >= 0:
+                self.image_list.selection_clear(0, END)
+                self.image_list.selection_set(last_index)
+        self._preview_selected_image()
 
     def _remove_image(self) -> None:
+        if not self._ensure_manageable():
+            return
         selection = self.image_list.curselection()
         if not selection:
             return
@@ -3170,8 +3716,11 @@ class PartAssetManager:
         if asset:
             asset.images = existing
             self.store.upsert(asset)
+        self._preview_selected_image()
 
     def _move_image(self, step: int) -> None:
+        if not self._ensure_manageable():
+            return
         selection = self.image_list.curselection()
         if not selection:
             return
@@ -3183,6 +3732,7 @@ class PartAssetManager:
         self.image_list.delete(idx)
         self.image_list.insert(new_idx, value)
         self.image_list.selection_set(new_idx)
+        self._preview_selected_image()
 
     def _open_image(self) -> None:
         selection = self.image_list.curselection()
@@ -3192,6 +3742,8 @@ class PartAssetManager:
         open_file(self.store.resolve_path(rel))
 
     def _choose_model(self) -> None:
+        if not self._ensure_manageable():
+            return
         part_no = self._require_part_no()
         if not part_no:
             return
@@ -3205,6 +3757,8 @@ class PartAssetManager:
         self.model_var.set(rel)
 
     def _clear_model(self) -> None:
+        if not self._ensure_manageable():
+            return
         asset = self.store.get(self.part_var.get())
         if not asset:
             return
@@ -3217,6 +3771,61 @@ class PartAssetManager:
         if not rel:
             return
         open_file(self.store.resolve_path(rel))
+
+    def _queue_crawl_tasks(self) -> None:
+        if not self._ensure_manageable():
+            return
+        entries = _split_lines(self.crawl_queue.get("1.0", END))
+        if self.part_var.get().strip():
+            entries.append(self.part_var.get().strip())
+        if not entries:
+            messagebox.showinfo("提示", "请先填写需要生成的料号列表。")
+            return
+        self.crawler.add_tasks(entries)
+        self._refresh_crawl_status()
+        messagebox.showinfo("已加入", "料号已加入生成队列，可随时开始生成。")
+
+    def _refresh_crawl_status(self) -> None:
+        statuses = self.crawler.statuses()
+        done, total = self.crawler.summary()
+        self.crawl_progress_var.set(f"进度：{done}/{total}")
+        if hasattr(self, "crawl_status_list"):
+            self.crawl_status_list.delete(0, END)
+            for item in statuses:
+                prefix = {
+                    "done": "✅",
+                    "failed": "❌",
+                    "pending": "⏳",
+                }.get(item.status, "•")
+                message = f"{prefix} {item.part_no} {item.message}".strip()
+                self.crawl_status_list.insert(END, message)
+
+    def _start_crawl(self) -> None:
+        if not self._ensure_manageable():
+            return
+        if self._crawl_thread and self._crawl_thread.is_alive():
+            messagebox.showinfo("处理中", "生成任务正在执行中，请稍候。")
+            return
+        self._crawl_error = None
+        self._crawl_thread = threading.Thread(target=self._run_crawler, daemon=True)
+        self._crawl_thread.start()
+        self._poll_crawl_progress()
+
+    def _run_crawler(self) -> None:
+        try:
+            self.crawler.run()
+        except Exception as exc:  # noqa: BLE001 - user feedback
+            self._crawl_error = exc
+
+    def _poll_crawl_progress(self) -> None:
+        self._refresh_crawl_status()
+        if self._crawl_thread and self._crawl_thread.is_alive():
+            self.top.after(600, self._poll_crawl_progress)
+            return
+        if self._crawl_error:
+            messagebox.showerror("生成失败", f"自动生成失败：{self._crawl_error}")
+        else:
+            self._refresh_crawl_status()
 
     def _validate_part_no(self, value: str) -> bool:
         return len(value) <= 15
