@@ -32,6 +32,27 @@ pip install -r requirements.txt
 3. 在界面中选择需要处理的 BOM Excel，点击“执行”。
 4. 如需维护绑定料号库，点击“编辑绑定料号”进行增删改或导入导出。
 
+### 自动生成料号资源库
+
+仓库提供了 `scripts/crawl_part_assets.py` 脚本，用于自动在互联网上检索料号的产品图片与官网链接，并写入 `料号资源/` 目录中的资源库。脚本会在每个任务间等待一段时间避免触发反爬，并通过 `crawl_progress.json` 记录进度，方便中断后继续执行。
+
+示例：
+
+```bash
+# 创建一个包含料号列表的文本文件，每行一个料号
+echo "UC3040010002" > parts.txt
+
+# 运行爬虫，处理文本中全部料号；可重复执行以继续未完成的任务
+python scripts/crawl_part_assets.py --parts-file parts.txt --delay 2
+```
+
+主要参数：
+
+- `--parts-file`：包含待处理料号的文件路径，默认为 `parts.txt`。
+- `--asset-root`：资源库所在目录，默认为仓库下的 `料号资源/`。
+- `--progress`：自定义进度文件路径，便于在其他位置保存进度。
+- `--limit`：本次最多处理的任务数量，方便分批运行。
+
 ## 生成 Windows 可执行文件
 
 如需在 Windows 上运行免安装版本，可使用 PyInstaller 打包。由于 PyInstaller 不支持跨平台打包，以下步骤需在 Windows 环境执行：
