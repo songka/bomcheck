@@ -70,7 +70,7 @@ class Application:
         self.root = root
         self.root.title("料号检测系统")
         self.config_path: Path = CONFIG_PATH
-        self.account_store = AccountStore(self.config_path.parent / "accounts.json")
+        self.account_store: AccountStore | None = None
         self.current_user: UserAccount | None = None
         self.system_part_path: Path | None = None
         self.blocked_applicant_path: Path | None = None
@@ -270,28 +270,38 @@ class Application:
         messagebox.showerror("无权限", "当前账户没有执行此操作的权限")
         return False
 
+    def _set_current_user(self, account: UserAccount | None) -> None:
+        self.current_user = account
+        if hasattr(self, "user_var"):
+            if account:
+                self.user_var.set(
+                    f"当前用户：{account.username}{' (管理员)' if account.is_admin else ''}"
+                )
+                if hasattr(self, "logout_btn"):
+                    self.logout_btn.config(state="normal")
+                if hasattr(self, "login_btn"):
+                    self.login_btn.config(state="disabled")
+            else:
+                self.user_var.set("未登录")
+                if hasattr(self, "logout_btn"):
+                    self.logout_btn.config(state="disabled")
+                if hasattr(self, "login_btn"):
+                    self.login_btn.config(state="normal")
+
+        self._refresh_controlled_buttons()
+        self._refresh_context_permissions()
+
     def _prompt_login(self, initial: bool = False) -> None:
         dialog = LoginDialog(self.root, self.account_store)
         self.root.wait_window(dialog.top)
         account = dialog.result
         if account:
-            self.current_user = account
-            self.user_var.set(f"当前用户：{account.username}{' (管理员)' if account.is_admin else ''}")
-            self.logout_btn.config(state="normal")
-            self.login_btn.config(state="disabled")
+            self._set_current_user(account)
         elif initial and not self.current_user:
-            self.user_var.set("未登录")
-            self.login_btn.config(state="normal")
-        self._refresh_controlled_buttons()
-        self._refresh_context_permissions()
+            self._set_current_user(None)
 
     def _logout(self) -> None:
-        self.current_user = None
-        self.user_var.set("未登录")
-        self.logout_btn.config(state="disabled")
-        self.login_btn.config(state="normal")
-        self._refresh_controlled_buttons()
-        self._refresh_context_permissions()
+        self._set_current_user(None)
 
     def _refresh_context_permissions(self) -> None:
         if hasattr(self, "system_part_viewer") and self.system_part_viewer:
@@ -305,11 +315,20 @@ class Application:
         binding_library.load()
         processor = ExcelProcessor(config)
         part_asset_store = PartAssetStore(config.part_asset_dir)
+        previous_user = self.current_user
+        account_store = AccountStore(config.account_store)
         self.config_path = path
         self.config = config
         self.binding_library = binding_library
         self.processor = processor
         self.part_asset_store = part_asset_store
+        self.account_store = account_store
+        restored_user = None
+        if previous_user:
+            candidate = account_store.accounts.get(previous_user.username)
+            if candidate and candidate.password_hash == previous_user.password_hash:
+                restored_user = candidate
+        self._set_current_user(restored_user)
         self.system_part_path = config.system_part_db
         self.system_part_repository = None
         self._system_part_repository_path = None
@@ -684,6 +703,7 @@ class DataFileEditor:
         self.system_part_var = StringVar(value=str(config.system_part_db))
         self.blocked_var = StringVar(value=str(config.blocked_applicants))
         self.asset_var = StringVar(value=str(config.part_asset_dir))
+        self.account_store_var = StringVar(value=str(config.account_store))
 
         self._build_ui()
 
@@ -750,6 +770,13 @@ class DataFileEditor:
             filetypes=[("目录", "*.*")],
             is_directory=True,
         )
+        self._build_file_selector(
+            frame,
+            row=7,
+            label_text="账号密码文件：",
+            text_var=self.account_store_var,
+            filetypes=[("账户", "*.json"), ("所有文件", "*.*")],
+        )
 
         button_frame = Frame(self.top)
         button_frame.pack(fill=BOTH, pady=(0, 10))
@@ -795,6 +822,7 @@ class DataFileEditor:
         system_part_path = self.system_part_var.get().strip()
         blocked_path = self.blocked_var.get().strip()
         asset_path = self.asset_var.get().strip()
+        account_path = self.account_store_var.get().strip()
 
         if not invalid_path or not binding_path:
             messagebox.showerror("保存失败", "请完整填写数据库文件路径。")
@@ -811,6 +839,9 @@ class DataFileEditor:
         if not asset_path:
             messagebox.showerror("保存失败", "请填写料号资源目录。")
             return
+        if not account_path:
+            messagebox.showerror("保存失败", "请填写账号密码文件路径。")
+            return
 
         new_config = AppConfig(
             invalid_part_db=self._normalize_path(invalid_path),
@@ -819,6 +850,7 @@ class DataFileEditor:
             system_part_db=self._normalize_path(system_part_path),
             blocked_applicants=self._normalize_path(blocked_path),
             part_asset_dir=self._normalize_path(asset_path),
+            account_store=self._normalize_path(account_path),
         )
 
         try:
