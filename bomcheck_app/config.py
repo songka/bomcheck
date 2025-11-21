@@ -14,6 +14,7 @@ DEFAULT_CONFIG = {
     "system_part_db": "系统料号.xlsx",
     "blocked_applicants": "屏蔽申请人.txt",
     "part_asset_dir": "料号资源",
+    "account_store": "accounts.json",
 }
 
 
@@ -25,6 +26,7 @@ class AppConfig:
     system_part_db: Path
     blocked_applicants: Path
     part_asset_dir: Path
+    account_store: Path
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], base_dir: Path) -> "AppConfig":
@@ -38,6 +40,10 @@ class AppConfig:
                 data.get("part_asset_dir") or DEFAULT_CONFIG["part_asset_dir"],
                 base_dir,
             ),
+            account_store=_resolve_path(
+                data.get("account_store") or DEFAULT_CONFIG["account_store"],
+                base_dir,
+            ),
         )
 
     def to_dict(self, base_dir: Path) -> Dict[str, str]:
@@ -48,6 +54,7 @@ class AppConfig:
             "system_part_db": _to_relative(self.system_part_db, base_dir),
             "blocked_applicants": _to_relative(self.blocked_applicants, base_dir),
             "part_asset_dir": _to_relative(self.part_asset_dir, base_dir),
+            "account_store": _to_relative(self.account_store, base_dir),
         }
 
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -48,10 +49,12 @@ class AssetCrawler:
         asset_root: Path,
         progress_path: Optional[Path] = None,
         delay_seconds: float = 1.0,
+        description_lookup: Optional[Callable[[str], str]] = None,
     ) -> None:
         self.store = PartAssetStore(asset_root)
         self.progress_path = progress_path or (asset_root / "crawl_progress.json")
         self.delay_seconds = delay_seconds
+        self._description_lookup = description_lookup
         self._tasks: Dict[str, CrawlStatus] = {}
         self._load_progress()
 
@@ -135,7 +138,12 @@ class AssetCrawler:
         self.store.upsert(asset)
 
         updates: list[str] = []
-        official = self._search_official_site(part_no)
+        description = self._lookup_description(part_no)
+        brand, model = _extract_brand_model(description)
+        search_terms = _build_search_terms(part_no, description, brand, model)
+
+        primary_keyword = " ".join(filter(None, (brand, model))) or part_no
+        official = self._search_official_site(primary_keyword)
         if official:
             updated_links = list(asset.remote_links)
             if official not in updated_links:
@@ -144,15 +152,23 @@ class AssetCrawler:
                 updates.append("官网链接")
 
         if not asset.images:
-            image_path = self.store.download_first_image_from_search(
-                part_no, f"{part_no} 产品 图片"
-            )
-            if image_path:
-                updates.append("图片")
+            for keyword in search_terms:
+                image_path = self.store.download_first_image_from_search(part_no, keyword)
+                if image_path:
+                    updates.append("图片")
+                    break
 
         if not updates:
             return "已存在资源，未更新"
         return f"已更新 {', '.join(updates)}"
+
+    def _lookup_description(self, part_no: str) -> str:
+        if not self._description_lookup:
+            return ""
+        try:
+            return self._description_lookup(part_no) or ""
+        except Exception:
+            return ""
 
     def _search_official_site(self, keyword: str) -> Optional[str]:
         response = requests.get(
@@ -175,9 +191,52 @@ class AssetCrawler:
                 fallback = href
         return fallback
 
-    def _is_http_url(self, url: str) -> bool:
+def _is_http_url(self, url: str) -> bool:
         parsed = urlparse(url)
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _extract_brand_model(description: str) -> tuple[str | None, str | None]:
+    brand = _extract_labeled_value(description, ("品牌", "牌子", "厂家", "厂商"))
+    model = _extract_labeled_value(description, ("型号", "规格型号", "机型"))
+
+    tokens = [token for token in re.split(r"[\s,;，；/、]+", description or "") if token]
+    if not brand and tokens:
+        brand = tokens[0]
+    if not model and len(tokens) > 1:
+        model = tokens[1]
+
+    return brand, model
+
+
+def _extract_labeled_value(description: str, labels: tuple[str, ...]) -> str | None:
+    for label in labels:
+        match = re.search(rf"{label}\s*[:：]?\s*([^,;；，/\s]+)", description or "")
+        if match:
+            value = match.group(1).strip()
+            if value:
+                return value
+    return None
+
+
+def _build_search_terms(
+    part_no: str, description: str, brand: str | None, model: str | None
+) -> list[str]:
+    terms: list[str] = []
+    base_pairs = [" ".join(filter(None, (brand, model))), model, description]
+    for phrase in base_pairs:
+        if not phrase:
+            continue
+        for suffix in (" 产品 图片", " 图片", ""):
+            keyword = f"{phrase}{suffix}".strip()
+            if keyword and keyword not in terms:
+                terms.append(keyword)
+
+    for keyword in (f"{part_no} 产品 图片", part_no):
+        if keyword not in terms:
+            terms.append(keyword)
+
+    return terms
 
 
 __all__ = ["AssetCrawler", "CrawlStatus"]
