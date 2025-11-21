@@ -70,7 +70,7 @@ class Application:
         self.root = root
         self.root.title("料号检测系统")
         self.config_path: Path = CONFIG_PATH
-        self.account_store = AccountStore(self.config_path.parent / "accounts.json")
+        self.account_store: AccountStore | None = None
         self.current_user: UserAccount | None = None
         self.system_part_path: Path | None = None
         self.blocked_applicant_path: Path | None = None
@@ -270,28 +270,38 @@ class Application:
         messagebox.showerror("无权限", "当前账户没有执行此操作的权限")
         return False
 
+    def _set_current_user(self, account: UserAccount | None) -> None:
+        self.current_user = account
+        if hasattr(self, "user_var"):
+            if account:
+                self.user_var.set(
+                    f"当前用户：{account.username}{' (管理员)' if account.is_admin else ''}"
+                )
+                if hasattr(self, "logout_btn"):
+                    self.logout_btn.config(state="normal")
+                if hasattr(self, "login_btn"):
+                    self.login_btn.config(state="disabled")
+            else:
+                self.user_var.set("未登录")
+                if hasattr(self, "logout_btn"):
+                    self.logout_btn.config(state="disabled")
+                if hasattr(self, "login_btn"):
+                    self.login_btn.config(state="normal")
+
+        self._refresh_controlled_buttons()
+        self._refresh_context_permissions()
+
     def _prompt_login(self, initial: bool = False) -> None:
         dialog = LoginDialog(self.root, self.account_store)
         self.root.wait_window(dialog.top)
         account = dialog.result
         if account:
-            self.current_user = account
-            self.user_var.set(f"当前用户：{account.username}{' (管理员)' if account.is_admin else ''}")
-            self.logout_btn.config(state="normal")
-            self.login_btn.config(state="disabled")
+            self._set_current_user(account)
         elif initial and not self.current_user:
-            self.user_var.set("未登录")
-            self.login_btn.config(state="normal")
-        self._refresh_controlled_buttons()
-        self._refresh_context_permissions()
+            self._set_current_user(None)
 
     def _logout(self) -> None:
-        self.current_user = None
-        self.user_var.set("未登录")
-        self.logout_btn.config(state="disabled")
-        self.login_btn.config(state="normal")
-        self._refresh_controlled_buttons()
-        self._refresh_context_permissions()
+        self._set_current_user(None)
 
     def _refresh_context_permissions(self) -> None:
         if hasattr(self, "system_part_viewer") and self.system_part_viewer:
@@ -305,11 +315,20 @@ class Application:
         binding_library.load()
         processor = ExcelProcessor(config)
         part_asset_store = PartAssetStore(config.part_asset_dir)
+        previous_user = self.current_user
+        account_store = AccountStore(config.account_store)
         self.config_path = path
         self.config = config
         self.binding_library = binding_library
         self.processor = processor
         self.part_asset_store = part_asset_store
+        self.account_store = account_store
+        restored_user = None
+        if previous_user:
+            candidate = account_store.accounts.get(previous_user.username)
+            if candidate and candidate.password_hash == previous_user.password_hash:
+                restored_user = candidate
+        self._set_current_user(restored_user)
         self.system_part_path = config.system_part_db
         self.system_part_repository = None
         self._system_part_repository_path = None
@@ -684,6 +703,8 @@ class DataFileEditor:
         self.system_part_var = StringVar(value=str(config.system_part_db))
         self.blocked_var = StringVar(value=str(config.blocked_applicants))
         self.asset_var = StringVar(value=str(config.part_asset_dir))
+        self.account_store_var = StringVar(value=str(config.account_store))
+        self._dialog_kwargs = {"parent": self.top}
 
         self._build_ui()
 
@@ -750,6 +771,13 @@ class DataFileEditor:
             filetypes=[("目录", "*.*")],
             is_directory=True,
         )
+        self._build_file_selector(
+            frame,
+            row=7,
+            label_text="账号密码文件：",
+            text_var=self.account_store_var,
+            filetypes=[("账户", "*.json"), ("所有文件", "*.*")],
+        )
 
         button_frame = Frame(self.top)
         button_frame.pack(fill=BOTH, pady=(0, 10))
@@ -782,9 +810,11 @@ class DataFileEditor:
         self, var: StringVar, filetypes: list[tuple[str, str]], is_directory: bool = False
     ) -> None:  # pragma: no cover - user interaction
         if is_directory:
-            selected = filedialog.askdirectory()
+            selected = filedialog.askdirectory(parent=self.top)
         else:
-            selected = filedialog.askopenfilename(filetypes=filetypes)
+            selected = filedialog.askopenfilename(
+                filetypes=filetypes, parent=self.top
+            )
         if selected:
             var.set(selected)
 
@@ -795,21 +825,37 @@ class DataFileEditor:
         system_part_path = self.system_part_var.get().strip()
         blocked_path = self.blocked_var.get().strip()
         asset_path = self.asset_var.get().strip()
+        account_path = self.account_store_var.get().strip()
 
         if not invalid_path or not binding_path:
-            messagebox.showerror("保存失败", "请完整填写数据库文件路径。")
+            messagebox.showerror(
+                "保存失败", "请完整填写数据库文件路径。", **self._dialog_kwargs
+            )
             return
         if not important_path:
-            messagebox.showerror("保存失败", "请填写重要物料清单路径。")
+            messagebox.showerror(
+                "保存失败", "请填写重要物料清单路径。", **self._dialog_kwargs
+            )
             return
         if not system_part_path:
-            messagebox.showerror("保存失败", "请填写系统料号文件路径。")
+            messagebox.showerror(
+                "保存失败", "请填写系统料号文件路径。", **self._dialog_kwargs
+            )
             return
         if not blocked_path:
-            messagebox.showerror("保存失败", "请填写屏蔽申请人列表路径。")
+            messagebox.showerror(
+                "保存失败", "请填写屏蔽申请人列表路径。", **self._dialog_kwargs
+            )
             return
         if not asset_path:
-            messagebox.showerror("保存失败", "请填写料号资源目录。")
+            messagebox.showerror(
+                "保存失败", "请填写料号资源目录。", **self._dialog_kwargs
+            )
+            return
+        if not account_path:
+            messagebox.showerror(
+                "保存失败", "请填写账号密码文件路径。", **self._dialog_kwargs
+            )
             return
 
         new_config = AppConfig(
@@ -819,12 +865,15 @@ class DataFileEditor:
             system_part_db=self._normalize_path(system_part_path),
             blocked_applicants=self._normalize_path(blocked_path),
             part_asset_dir=self._normalize_path(asset_path),
+            account_store=self._normalize_path(account_path),
         )
 
         try:
             self.on_save(new_config)
         except Exception as exc:  # pragma: no cover - user feedback
-            messagebox.showerror("保存失败", f"无法更新配置：{exc}")
+            messagebox.showerror(
+                "保存失败", f"无法更新配置：{exc}", **self._dialog_kwargs
+            )
             return
 
         self.top.destroy()
@@ -832,16 +881,22 @@ class DataFileEditor:
     def _process_system_parts(self) -> None:
         source_path = self.system_part_var.get().strip()
         if not source_path:
-            messagebox.showerror("处理失败", "请先选择系统料号原始文件。")
+            messagebox.showerror(
+                "处理失败", "请先选择系统料号原始文件。", **self._dialog_kwargs
+            )
             return
 
         invalid_path = self.invalid_var.get().strip()
         blocked_path = self.blocked_var.get().strip()
         if not invalid_path:
-            messagebox.showerror("处理失败", "请先设置失效料号数据库路径。")
+            messagebox.showerror(
+                "处理失败", "请先设置失效料号数据库路径。", **self._dialog_kwargs
+            )
             return
         if not blocked_path:
-            messagebox.showerror("处理失败", "请先设置屏蔽申请人列表路径。")
+            messagebox.showerror(
+                "处理失败", "请先设置屏蔽申请人列表路径。", **self._dialog_kwargs
+            )
             return
 
         try:
@@ -849,14 +904,22 @@ class DataFileEditor:
             invalid = self._normalize_path(invalid_path)
             blocked = self._normalize_path(blocked_path)
         except Exception as exc:  # pragma: no cover - defensive
-            messagebox.showerror("处理失败", f"路径解析失败：{exc}")
+            messagebox.showerror(
+                "处理失败", f"路径解析失败：{exc}", **self._dialog_kwargs
+            )
             return
 
         if not source.exists():
-            messagebox.showerror("处理失败", f"未找到系统料号原始文件：{source}")
+            messagebox.showerror(
+                "处理失败",
+                f"未找到系统料号原始文件：{source}",
+                **self._dialog_kwargs,
+            )
             return
         if not invalid.exists():
-            messagebox.showerror("处理失败", f"未找到失效料号数据库：{invalid}")
+            messagebox.showerror(
+                "处理失败", f"未找到失效料号数据库：{invalid}", **self._dialog_kwargs
+            )
             return
         blocked.parent.mkdir(parents=True, exist_ok=True)
         if not blocked.exists():
@@ -865,11 +928,15 @@ class DataFileEditor:
         try:
             output_path = generate_system_part_excel(source, invalid, blocked)
         except Exception as exc:
-            messagebox.showerror("处理失败", f"系统料号处理失败：{exc}")
+            messagebox.showerror(
+                "处理失败", f"系统料号处理失败：{exc}", **self._dialog_kwargs
+            )
             return
 
         self.system_part_var.set(str(output_path))
-        messagebox.showinfo("完成", f"系统料号Excel已生成：{output_path}")
+        messagebox.showinfo(
+            "完成", f"系统料号Excel已生成：{output_path}", **self._dialog_kwargs
+        )
 
     def _normalize_path(self, raw_path: str) -> Path:
         path = Path(raw_path)
@@ -1837,7 +1904,9 @@ class InvalidPartEditor:
         self._suspend_events = False
         self.top = Toplevel(master)
         self.top.title("失效料号库编辑")
+        self.top.transient(master)
         self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
+        self._dialog_kwargs = {"parent": self.top}
         self._build_ui()
         self._load_entries()
 
@@ -1923,7 +1992,7 @@ class InvalidPartEditor:
     def _copy_selected_entry(self) -> None:
         self._commit_current_entry()
         if self.selected_index is None or not (0 <= self.selected_index < len(self.entries)):
-            messagebox.showinfo("复制", "请先选择需要复制的记录。")
+            messagebox.showinfo("复制", "请先选择需要复制的记录。", **self._dialog_kwargs)
             return
         entry = self.entries[self.selected_index]
         row_text = "\t".join(
@@ -1938,7 +2007,9 @@ class InvalidPartEditor:
             self.top.clipboard_clear()
             self.top.clipboard_append(row_text)
         except Exception as exc:
-            messagebox.showerror("复制失败", f"无法写入剪贴板：{exc}")
+            messagebox.showerror(
+                "复制失败", f"无法写入剪贴板：{exc}", **self._dialog_kwargs
+            )
 
     def _apply_filter(self) -> None:
         self._refresh_tree()
@@ -2046,7 +2117,9 @@ class InvalidPartEditor:
                     )
                 workbook.close()
         except Exception as exc:
-            messagebox.showerror("加载失败", f"读取失效料号失败：{exc}")
+            messagebox.showerror(
+                "加载失败", f"读取失效料号失败：{exc}", **self._dialog_kwargs
+            )
             self.entries = []
         self._refresh_tree()
         if self.entries:
@@ -2169,7 +2242,9 @@ class InvalidPartEditor:
         try:
             raw_text = self.top.clipboard_get()
         except Exception as exc:
-            messagebox.showerror("粘贴失败", f"无法读取剪贴板：{exc}")
+            messagebox.showerror(
+                "粘贴失败", f"无法读取剪贴板：{exc}", **self._dialog_kwargs
+            )
             return
         rows: list[InvalidPartEntry] = []
         for line in raw_text.splitlines():
@@ -2321,14 +2396,18 @@ class InvalidPartEditor:
         duplicate_invalids = self._find_duplicate_invalids(cleaned_entries)
         if duplicate_invalids:
             message = "\n".join(duplicate_invalids)
-            messagebox.showerror("保存失败", f"存在重复的失效料号：\n{message}")
+            messagebox.showerror(
+                "保存失败", f"存在重复的失效料号：\n{message}", **self._dialog_kwargs
+            )
             return
         self.entries = cleaned_entries
         self._refresh_tree()
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
-            messagebox.showerror("保存失败", f"创建目录失败：{exc}")
+            messagebox.showerror(
+                "保存失败", f"创建目录失败：{exc}", **self._dialog_kwargs
+            )
             return
         workbook = Workbook()
         sheet = workbook.active
@@ -2355,15 +2434,17 @@ class InvalidPartEditor:
         try:
             workbook.save(self.path)
         except Exception as exc:
-            messagebox.showerror("保存失败", f"写入失效料号失败：{exc}")
+            messagebox.showerror(
+                "保存失败", f"写入失效料号失败：{exc}", **self._dialog_kwargs
+            )
             return
         finally:
             workbook.close()
-        messagebox.showinfo("保存成功", f"已保存到：{self.path}")
+        messagebox.showinfo("保存成功", f"已保存到：{self.path}", **self._dialog_kwargs)
 
     def _reload_entries(self) -> None:
         self._load_entries()
-        messagebox.showinfo("完成", "失效料号已重新加载。")
+        messagebox.showinfo("完成", "失效料号已重新加载。", **self._dialog_kwargs)
 
     def _handle_close(self) -> None:
         if self.on_close:
@@ -2410,7 +2491,7 @@ class LoginDialog:
             self.username_var.get().strip(), self.password_var.get()
         )
         if not account:
-            messagebox.showerror("登录失败", "用户名或密码错误")
+            messagebox.showerror("登录失败", "用户名或密码错误", parent=self.top)
             return
         self.result = account
         self.top.destroy()
@@ -2432,6 +2513,7 @@ class AdminSettingsDialog:
         self.top.geometry("560x420")
         self.top.transient(master)
         self.top.grab_set()
+        self._dialog_kwargs = {"parent": self.top}
         self.username_var = StringVar()
         self.password_var = StringVar()
         self.is_admin_var = BooleanVar()
@@ -2545,7 +2627,7 @@ class AdminSettingsDialog:
     def _save_user(self) -> None:
         username = self.username_var.get().strip()
         if not username:
-            messagebox.showerror("保存失败", "请填写用户名")
+            messagebox.showerror("保存失败", "请填写用户名", **self._dialog_kwargs)
             return
         existing = self.store.accounts.get(username)
         if existing:
@@ -2566,7 +2648,7 @@ class AdminSettingsDialog:
                 self.on_updated()
             except Exception:
                 pass
-        messagebox.showinfo("完成", "账户已保存")
+        messagebox.showinfo("完成", "账户已保存", **self._dialog_kwargs)
 
     def _delete_user(self) -> None:
         selection = self.user_list.curselection()
@@ -2578,9 +2660,11 @@ class AdminSettingsDialog:
             return
         admins = [u for u in self.store.accounts.values() if u.is_admin]
         if account.is_admin and len(admins) <= 1:
-            messagebox.showerror("无法删除", "至少需要保留一个管理员账户。")
+            messagebox.showerror("无法删除", "至少需要保留一个管理员账户。", **self._dialog_kwargs)
             return
-        if not messagebox.askyesno("确认", f"删除账户 {username}？"):
+        if not messagebox.askyesno(
+            "确认", f"删除账户 {username}？", **self._dialog_kwargs
+        ):
             return
         self.store.delete(username)
         self._load_users()
@@ -2601,9 +2685,11 @@ class BlockedApplicantEditor:
         self.on_close = on_close
         self.top = Toplevel(master)
         self.top.title("屏蔽申请人编辑")
+        self.top.transient(master)
         self._build_ui()
         self.update_path(path)
         self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
+        self._dialog_kwargs = {"parent": self.top}
 
     def update_path(self, new_path: Path) -> None:
         self.path = new_path
@@ -2640,7 +2726,9 @@ class BlockedApplicantEditor:
                 self.path.touch()
             content = self.path.read_text(encoding="utf-8")
         except Exception as exc:  # pragma: no cover - user feedback
-            messagebox.showerror("加载失败", f"读取屏蔽申请人失败：{exc}")
+            messagebox.showerror(
+                "加载失败", f"读取屏蔽申请人失败：{exc}", **self._dialog_kwargs
+            )
             content = ""
         self.text.delete(1.0, END)
         self.text.insert(END, content)
@@ -2652,9 +2740,11 @@ class BlockedApplicantEditor:
         try:
             self.path.write_text(content, encoding="utf-8")
         except Exception as exc:  # pragma: no cover - user feedback
-            messagebox.showerror("保存失败", f"写入屏蔽申请人失败：{exc}")
+            messagebox.showerror(
+                "保存失败", f"写入屏蔽申请人失败：{exc}", **self._dialog_kwargs
+            )
         else:
-            messagebox.showinfo("保存成功", f"已保存到：{self.path}")
+            messagebox.showinfo("保存成功", f"已保存到：{self.path}", **self._dialog_kwargs)
 
     def _handle_close(self) -> None:
         if self.on_close:
@@ -2677,7 +2767,9 @@ class BindingEditor:
         self.on_close = on_close
         self.top = Toplevel(master)
         self.top.title("绑定料号编辑")
+        self.top.transient(master)
         self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
+        self._dialog_kwargs = {"parent": self.top}
         self.projects: list[BindingProject] = []
         self.selected_project_index: int | None = None
         self.selected_group_index: int | None = None
@@ -3178,7 +3270,7 @@ class BindingEditor:
 
     def _copy_project(self) -> None:
         if self.selected_project_index is None:
-            messagebox.showwarning("提示", "请先选择项目")
+            messagebox.showwarning("提示", "请先选择项目", **self._dialog_kwargs)
             return
         self._commit_all()
         project = self.projects[self.selected_project_index]
@@ -3186,7 +3278,7 @@ class BindingEditor:
 
     def _paste_project(self) -> None:
         if self.project_clipboard is None:
-            messagebox.showwarning("提示", "请先复制项目")
+            messagebox.showwarning("提示", "请先复制项目", **self._dialog_kwargs)
             return
         self._commit_all()
         new_project = BindingProject.from_dict(self.project_clipboard.to_dict())
@@ -3200,7 +3292,7 @@ class BindingEditor:
 
     def _add_group(self) -> None:
         if self.selected_project_index is None:
-            messagebox.showwarning("提示", "请先选择项目")
+            messagebox.showwarning("提示", "请先选择项目", **self._dialog_kwargs)
             return
         self._commit_project_fields()
         self._commit_group_fields()
@@ -3231,7 +3323,7 @@ class BindingEditor:
 
     def _copy_group(self) -> None:
         if self.selected_project_index is None or self.selected_group_index is None:
-            messagebox.showwarning("提示", "请先选择分组")
+            messagebox.showwarning("提示", "请先选择分组", **self._dialog_kwargs)
             return
         self._commit_choice_fields()
         self._commit_group_fields()
@@ -3240,10 +3332,10 @@ class BindingEditor:
 
     def _paste_group(self) -> None:
         if self.selected_project_index is None:
-            messagebox.showwarning("提示", "请先选择项目")
+            messagebox.showwarning("提示", "请先选择项目", **self._dialog_kwargs)
             return
         if self.group_clipboard is None:
-            messagebox.showwarning("提示", "请先复制分组")
+            messagebox.showwarning("提示", "请先复制分组", **self._dialog_kwargs)
             return
         self._commit_group_fields()
         self._commit_choice_fields()
@@ -3259,7 +3351,7 @@ class BindingEditor:
 
     def _add_choice(self) -> None:
         if self.selected_project_index is None or self.selected_group_index is None:
-            messagebox.showwarning("提示", "请先选择分组")
+            messagebox.showwarning("提示", "请先选择分组", **self._dialog_kwargs)
             return
         self._commit_group_fields()
         self._commit_choice_fields()
@@ -3307,19 +3399,25 @@ class BindingEditor:
         self._commit_project_fields()
 
     def _import_excel(self) -> None:
-        file_path = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx"), ("Excel", "*.xlsm")])
+        file_path = filedialog.askopenfilename(
+            filetypes=[("Excel", "*.xlsx"), ("Excel", "*.xlsm")], parent=self.top
+        )
         if not file_path:
             return
         try:
             self.binding_library.import_excel(Path(file_path))
         except Exception as exc:
-            messagebox.showerror("错误", f"导入失败：{exc}")
+            messagebox.showerror("错误", f"导入失败：{exc}", **self._dialog_kwargs)
             return
         self._load_data()
-        messagebox.showinfo("完成", "导入成功")
+        messagebox.showinfo("完成", "导入成功", **self._dialog_kwargs)
 
     def _export_excel(self) -> None:
-        file_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            parent=self.top,
+        )
         if not file_path:
             return
         self._commit_all()
@@ -3328,11 +3426,11 @@ class BindingEditor:
         try:
             self.binding_library.export_excel(Path(file_path))
         except Exception as exc:
-            messagebox.showerror("错误", f"导出失败：{exc}")
+            messagebox.showerror("错误", f"导出失败：{exc}", **self._dialog_kwargs)
             return
         finally:
             self.binding_library.projects = original_projects
-        messagebox.showinfo("完成", "导出成功")
+        messagebox.showinfo("完成", "导出成功", **self._dialog_kwargs)
 
     def _save(self) -> None:
         self._commit_all()
@@ -3340,9 +3438,9 @@ class BindingEditor:
         try:
             self.binding_library.save()
         except Exception as exc:
-            messagebox.showerror("错误", f"保存失败：{exc}")
+            messagebox.showerror("错误", f"保存失败：{exc}", **self._dialog_kwargs)
             return
-        messagebox.showinfo("完成", "保存成功")
+        messagebox.showinfo("完成", "保存成功", **self._dialog_kwargs)
 
     def _handle_close(self) -> None:
         if self.on_close:
@@ -3372,7 +3470,9 @@ class PartAssetManager:
         self.search_var = StringVar()
         self.crawl_progress_var = StringVar(value="进度：0/0")
         self._image_preview_photo: ImageTk.PhotoImage | None = None
-        self.crawler = AssetCrawler(store.root)
+        self.crawler = AssetCrawler(
+            store.root, description_lookup=self._lookup_system_description
+        )
         self._crawl_thread: threading.Thread | None = None
         self._crawl_error: Exception | None = None
         self._crawl_status_index: list[str] = []
@@ -3383,7 +3483,9 @@ class PartAssetManager:
         self.top = Toplevel(master)
         self.top.title("料号资源维护")
         self.top.geometry("980x640")
+        self.top.transient(master)
         self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
+        self._dialog_kwargs = {"parent": self.top}
 
         self.part_var = StringVar()
         self.desc_var = StringVar()
@@ -3561,6 +3663,13 @@ class PartAssetManager:
         self.search_var.set("")
         self._load_assets()
 
+    def _lookup_system_description(self, part_no: str) -> str:
+        repository = self._system_part_provider() if self._system_part_provider else None
+        if not repository:
+            return ""
+        record = repository.find(part_no)
+        return record.description if record else ""
+
     def _filtered_assets(self) -> list[tuple[PartAsset, str]]:
         query = self.search_var.get().strip().lower()
         assets: list[tuple[PartAsset, str]] = []
@@ -3651,7 +3760,9 @@ class PartAssetManager:
     def _ensure_manageable(self) -> bool:
         if self._can_manage:
             return True
-        messagebox.showerror("无权限", "当前账户无权维护料号资源。")
+        messagebox.showerror(
+            "无权限", "当前账户无权维护料号资源。", **self._dialog_kwargs
+        )
         return False
 
     def update_permission(self, allowed: bool) -> None:
@@ -3695,7 +3806,9 @@ class PartAssetManager:
             return
         index = selection[0]
         part_no = self._asset_index[index]
-        if not messagebox.askyesno("确认", f"删除 {part_no} 的资源？"):
+        if not messagebox.askyesno(
+            "确认", f"删除 {part_no} 的资源？", **self._dialog_kwargs
+        ):
             return
         self.store.remove(part_no)
         self._load_assets()
@@ -3707,7 +3820,9 @@ class PartAssetManager:
         part_no = self.part_var.get().strip()
         normalized = normalize_part_no(part_no)
         if not normalized:
-            messagebox.showerror("保存失败", "请填写有效的料号。")
+            messagebox.showerror(
+                "保存失败", "请填写有效的料号。", **self._dialog_kwargs
+            )
             return
         asset = self.store.get(normalized) or PartAsset(part_no=normalized)
         asset.part_no = normalized
@@ -3718,7 +3833,7 @@ class PartAssetManager:
         self.store.upsert(asset)
         self.selected_part = normalized
         self._load_assets()
-        messagebox.showinfo("完成", "资源已保存")
+        messagebox.showinfo("完成", "资源已保存", **self._dialog_kwargs)
 
     def _add_images(self) -> None:
         if not self._ensure_manageable():
@@ -3729,6 +3844,7 @@ class PartAssetManager:
         file_paths = filedialog.askopenfilenames(
             title="选择图片",
             filetypes=[("图片", "*.png *.jpg *.jpeg *.bmp *.gif"), ("所有文件", "*.*")],
+            parent=self.top,
         )
         if not file_paths:
             return
@@ -3795,6 +3911,7 @@ class PartAssetManager:
         file_path = filedialog.askopenfilename(
             title="选择3D文件",
             filetypes=[("模型", "*.step *.stp *.stl *.obj *.iges *.igs"), ("所有文件", "*.*")],
+            parent=self.top,
         )
         if not file_path:
             return
@@ -3824,7 +3941,9 @@ class PartAssetManager:
         if self.part_var.get().strip():
             entries.append(self.part_var.get().strip())
         if not entries:
-            messagebox.showinfo("提示", "请先填写需要生成的料号列表。")
+            messagebox.showinfo(
+                "提示", "请先填写需要生成的料号列表。", **self._dialog_kwargs
+            )
             return
         self._add_crawl_tasks(entries, "请先填写需要生成的料号列表。")
 
@@ -3839,7 +3958,9 @@ class PartAssetManager:
     def _queue_missing_assets(self) -> None:
         repository = self._system_part_provider() if self._system_part_provider else None
         if not repository:
-            messagebox.showerror("缺少配置", "请先在数据文件设置中配置系统料号文件。")
+            messagebox.showerror(
+                "缺少配置", "请先在数据文件设置中配置系统料号文件。", **self._dialog_kwargs
+            )
             return
         existing_assets = {asset.part_no for asset in self.store.list_assets()}
         missing_parts = []
@@ -3862,11 +3983,13 @@ class PartAssetManager:
             seen.add(normalized_part)
             normalized.append(normalized_part)
         if not normalized:
-            messagebox.showinfo("提示", empty_message)
+            messagebox.showinfo("提示", empty_message, **self._dialog_kwargs)
             return
         self.crawler.add_tasks(normalized)
         self._refresh_crawl_status()
-        messagebox.showinfo("已加入", "料号已加入生成队列，可随时开始生成。")
+        messagebox.showinfo(
+            "已加入", "料号已加入生成队列，可随时开始生成。", **self._dialog_kwargs
+        )
 
     def _refresh_crawl_status(self) -> None:
         statuses = self.crawler.statuses()
@@ -3908,7 +4031,9 @@ class PartAssetManager:
         ]
         if not part_nos:
             return
-        if not messagebox.askyesno("确认", "删除选中的生成任务进度？"):
+        if not messagebox.askyesno(
+            "确认", "删除选中的生成任务进度？", **self._dialog_kwargs
+        ):
             return
         self.crawler.remove_tasks(part_nos)
         self._refresh_crawl_status()
@@ -3918,7 +4043,9 @@ class PartAssetManager:
             return
         if not self._crawl_status_index:
             return
-        if not messagebox.askyesno("确认", "清空所有生成任务的进度记录？"):
+        if not messagebox.askyesno(
+            "确认", "清空所有生成任务的进度记录？", **self._dialog_kwargs
+        ):
             return
         self.crawler.clear()
         self._refresh_crawl_status()
@@ -3927,7 +4054,9 @@ class PartAssetManager:
         if not self._ensure_manageable():
             return
         if self._crawl_thread and self._crawl_thread.is_alive():
-            messagebox.showinfo("处理中", "生成任务正在执行中，请稍候。")
+            messagebox.showinfo(
+                "处理中", "生成任务正在执行中，请稍候。", **self._dialog_kwargs
+            )
             return
         self._crawl_error = None
         self._crawl_thread = threading.Thread(target=self._run_crawler, daemon=True)
@@ -3946,7 +4075,9 @@ class PartAssetManager:
             self.top.after(600, self._poll_crawl_progress)
             return
         if self._crawl_error:
-            messagebox.showerror("生成失败", f"自动生成失败：{self._crawl_error}")
+            messagebox.showerror(
+                "生成失败", f"自动生成失败：{self._crawl_error}", **self._dialog_kwargs
+            )
         else:
             self._refresh_crawl_status()
 
@@ -3957,7 +4088,9 @@ class PartAssetManager:
         part_no = self.part_var.get().strip()
         normalized = normalize_part_no(part_no)
         if not normalized:
-            messagebox.showerror("缺少料号", "请先填写有效的料号后再操作。")
+            messagebox.showerror(
+                "缺少料号", "请先填写有效的料号后再操作。", **self._dialog_kwargs
+            )
             return None
         self.part_var.set(normalized)
         return normalized
@@ -3987,7 +4120,9 @@ class ImportantMaterialEditor:
         self.on_close = on_close
         self.top = Toplevel(master)
         self.top.title("重要物料编辑")
+        self.top.transient(master)
         self.top.protocol("WM_DELETE_WINDOW", self._handle_close)
+        self._dialog_kwargs = {"parent": self.top}
         self._build_ui()
         self._load_content()
 
@@ -4020,7 +4155,9 @@ class ImportantMaterialEditor:
                 self.path.touch()
             content = self.path.read_text(encoding="utf-8")
         except Exception as exc:  # pragma: no cover - user feedback
-            messagebox.showerror("加载失败", f"读取重要物料失败：{exc}")
+            messagebox.showerror(
+                "加载失败", f"读取重要物料失败：{exc}", **self._dialog_kwargs
+            )
             content = ""
         self.text.delete(1.0, END)
         self.text.insert(END, content)
@@ -4032,9 +4169,11 @@ class ImportantMaterialEditor:
         try:
             self.path.write_text(content, encoding="utf-8")
         except Exception as exc:  # pragma: no cover - user feedback
-            messagebox.showerror("保存失败", f"写入重要物料失败：{exc}")
+            messagebox.showerror(
+                "保存失败", f"写入重要物料失败：{exc}", **self._dialog_kwargs
+            )
         else:
-            messagebox.showinfo("保存成功", f"重要物料已保存到：{self.path}")
+            messagebox.showinfo("保存成功", f"重要物料已保存到：{self.path}", **self._dialog_kwargs)
 
     def _handle_close(self) -> None:
         if self.on_close:
