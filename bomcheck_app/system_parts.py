@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import isclose
 import csv
 import re
@@ -20,13 +20,23 @@ class SystemPartRecord:
     unit: str
     applicant: str
     inventory: float | None
+    _categories: tuple[str, ...] = field(init=False, repr=False)
+    _search_fields: tuple[str, ...] = field(init=False, repr=False)
 
-    @property
-    def categories(self) -> tuple[str, ...]:
+    def __post_init__(self) -> None:
         categories: list[str] = [_categorize_part_no(self.part_no)]
         parts = [segment.strip() for segment in self.description.split(";") if segment.strip()]
         categories.extend(parts)
-        return tuple(categories) if categories else ("未分类",)
+        self._categories = tuple(categories) if categories else ("未分类",)
+        self._search_fields = _prepare_search_fields(self.part_no, self.description, self.applicant)
+
+    @property
+    def categories(self) -> tuple[str, ...]:
+        return self._categories
+
+    @property
+    def search_fields(self) -> tuple[str, ...]:
+        return self._search_fields
 
     @property
     def inventory_display(self) -> str:
@@ -274,25 +284,11 @@ def _should_block(applicant: str, blocked: "BlockedApplicantMatcher") -> bool:
 def _matches_query(record: SystemPartRecord, keywords: list[set[str]]) -> bool:
     if not keywords:
         return True
-    fields: list[str] = []
-    part_no = record.part_no or ""
-    description = record.description or ""
-    applicant = record.applicant or ""
-    for value in (part_no, description, applicant):
-        base = value.strip().lower()
-        if base:
-            fields.append(base)
-        normalized = normalize_text(value)
-        if normalized and normalized not in fields:
-            fields.append(normalized)
-    normalized_part = normalize_part_no(part_no)
-    if normalized_part:
-        fields.append(normalized_part.lower())
     for keyword_variants in keywords:
         if not keyword_variants:
             continue
         matched = False
-        for text in fields:
+        for text in record.search_fields:
             for variant in keyword_variants:
                 if variant and variant in text:
                     matched = True
@@ -302,6 +298,26 @@ def _matches_query(record: SystemPartRecord, keywords: list[set[str]]) -> bool:
         if not matched:
             return False
     return True
+
+
+def _prepare_search_fields(part_no: str, description: str, applicant: str) -> tuple[str, ...]:
+    fields: list[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in fields:
+            fields.append(value)
+
+    for value in (part_no, description, applicant):
+        base = (value or "").strip().lower()
+        add(base)
+        normalized = normalize_text(value)
+        add(normalized)
+
+    normalized_part = normalize_part_no(part_no)
+    if normalized_part:
+        add(normalized_part.lower())
+
+    return tuple(fields)
 
 
 def _safe_str(value) -> str:
