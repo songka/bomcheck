@@ -50,11 +50,17 @@ class AssetCrawler:
         progress_path: Optional[Path] = None,
         delay_seconds: float = 1.0,
         description_lookup: Optional[Callable[[str], str]] = None,
+        ua_lookup_urls: Optional[Iterable[str]] = None,
     ) -> None:
         self.store = PartAssetStore(asset_root)
         self.progress_path = progress_path or (asset_root / "crawl_progress.json")
         self.delay_seconds = delay_seconds
         self._description_lookup = description_lookup
+        self._ua_lookup_urls = [
+            url.strip()
+            for url in ua_lookup_urls or []
+            if url and self._is_http_url(url.strip())
+        ]
         self._tasks: Dict[str, CrawlStatus] = {}
         self._load_progress()
 
@@ -134,13 +140,21 @@ class AssetCrawler:
         return done, total
 
     def _process_part(self, part_no: str) -> str:
+        normalized = normalize_part_no(part_no) or part_no
+        if normalized.startswith("UB"):
+            return "UB 料号无需自动生成，已跳过"
+
         asset = self.store.get(part_no) or PartAsset(part_no=part_no)
         self.store.upsert(asset)
 
         updates: list[str] = []
+
         description = self._lookup_description(part_no)
         brand, model = _extract_brand_model(description)
         search_terms = _build_search_terms(part_no, description, brand, model)
+
+        if normalized.startswith("UA"):
+            updates.extend(self._update_from_ua_sources(normalized))
 
         primary_keyword = " ".join(filter(None, (brand, model))) or part_no
         official = self._search_official_site(primary_keyword)
@@ -191,9 +205,129 @@ class AssetCrawler:
                 fallback = href
         return fallback
 
-def _is_http_url(self, url: str) -> bool:
+    def _is_http_url(self, url: str) -> bool:
         parsed = urlparse(url)
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    def _update_from_ua_sources(self, part_no: str) -> list[str]:
+        if not self._ua_lookup_urls:
+            return []
+
+        found_remote: list[str] = []
+        found_local: list[str] = []
+        for url in self._ua_lookup_urls:
+            try:
+                response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+                response.raise_for_status()
+            except Exception:
+                continue
+
+            try:
+                found_remote.extend(self._search_links_in_json(response.json(), part_no))
+                found_local.extend(self._search_local_paths_in_json(response.json(), part_no))
+            except Exception:
+                pass
+
+            found_remote.extend(self._search_links_in_response(response.text, part_no))
+            found_local.extend(self._search_local_paths_in_response(response.text, part_no))
+
+        updates: list[str] = []
+        found_remote = list(dict.fromkeys(found_remote))
+        found_local = list(dict.fromkeys(found_local))
+        if found_remote:
+            asset = self.store.get(part_no) or PartAsset(part_no=part_no)
+            existing_remote = set(asset.remote_links)
+            merged_remote = list(existing_remote)
+            for link in found_remote:
+                if link not in existing_remote:
+                    merged_remote.append(link)
+            if merged_remote != list(existing_remote):
+                self.store.set_remote_links(part_no, merged_remote)
+                updates.append("UA链接")
+
+        if found_local:
+            asset = self.store.get(part_no) or PartAsset(part_no=part_no)
+            existing_local = set(asset.local_paths)
+            merged_local = list(existing_local)
+            for path in found_local:
+                if path not in existing_local:
+                    merged_local.append(path)
+            if merged_local != list(existing_local):
+                self.store.set_local_paths(part_no, merged_local)
+                updates.append("UA档案")
+
+        return updates
+
+    def _search_links_in_response(self, text: str, part_no: str) -> list[str]:
+        soup = BeautifulSoup(text, "html.parser")
+        matches: list[str] = []
+        normalized = part_no.lower()
+        for link in soup.find_all("a"):
+            content = " ".join(link.stripped_strings).lower()
+            href = link.get("href", "").strip()
+            if normalized in content or normalized in href.lower():
+                if href and self._is_http_url(href) and href not in matches:
+                    matches.append(href)
+        return matches
+
+    def _search_links_in_json(self, payload, part_no: str) -> list[str]:
+        results: list[str] = []
+        normalized = part_no.lower()
+        if isinstance(payload, dict):
+            contains_part = any(
+                normalize_part_no(str(value)).lower() == normalized
+                for value in payload.values()
+                if isinstance(value, (str, int, float))
+            )
+            for value in payload.values():
+                results.extend(self._search_links_in_json(value, part_no))
+            if contains_part:
+                for value in payload.values():
+                    if isinstance(value, str) and self._is_http_url(value) and value not in results:
+                        results.append(value)
+        elif isinstance(payload, list):
+            for item in payload:
+                results.extend(self._search_links_in_json(item, part_no))
+        elif isinstance(payload, str):
+            if normalized in payload.lower() and self._is_http_url(payload) and payload not in results:
+                results.append(payload)
+        return results
+
+    def _search_local_paths_in_response(self, text: str, part_no: str) -> list[str]:
+        normalized = part_no.lower()
+        matches: list[str] = []
+        for line in text.splitlines():
+            lower = line.lower()
+            if normalized not in lower:
+                continue
+            for candidate in re.findall(r"(\\\\[^\s\"]+|/[\w./-]+)", line):
+                cleaned = candidate.strip()
+                if cleaned and cleaned not in matches:
+                    matches.append(cleaned)
+        return matches
+
+    def _search_local_paths_in_json(self, payload, part_no: str) -> list[str]:
+        results: list[str] = []
+        normalized = part_no.lower()
+        if isinstance(payload, dict):
+            contains_part = any(
+                normalize_part_no(str(value)).lower() == normalized
+                for value in payload.values()
+                if isinstance(value, (str, int, float))
+            )
+            for value in payload.values():
+                results.extend(self._search_local_paths_in_json(value, part_no))
+            if contains_part:
+                for value in payload.values():
+                    if isinstance(value, str) and not self._is_http_url(value) and value not in results:
+                        results.append(value)
+        elif isinstance(payload, list):
+            for item in payload:
+                results.extend(self._search_local_paths_in_json(item, part_no))
+        elif isinstance(payload, str):
+            if normalized in payload.lower() and not self._is_http_url(payload) and payload not in results:
+                results.append(payload)
+        return results
 
 
 def _extract_brand_model(description: str) -> tuple[str | None, str | None]:

@@ -524,6 +524,7 @@ class Application:
             self.part_asset_store,
             part_lookup=self._lookup_system_part_desc,
             system_part_provider=self._get_system_part_repository,
+            ua_lookup_urls=self.config.ua_lookup_urls,
             on_close=lambda: setattr(self, "part_asset_manager", None),
         )
         self.part_asset_manager.update_permission(self._is_allowed("asset"))
@@ -704,6 +705,7 @@ class DataFileEditor:
         self.blocked_var = StringVar(value=str(config.blocked_applicants))
         self.asset_var = StringVar(value=str(config.part_asset_dir))
         self.account_store_var = StringVar(value=str(config.account_store))
+        self.ua_urls_text_value = "\n".join(config.ua_lookup_urls)
         self._dialog_kwargs = {"parent": self.top}
 
         self._build_ui()
@@ -778,6 +780,11 @@ class DataFileEditor:
             text_var=self.account_store_var,
             filetypes=[("账户", "*.json"), ("所有文件", "*.*")],
         )
+        Label(frame, text="UA 成品网址（每行一个）：").grid(row=8, column=0, sticky="nw", pady=5)
+        self.ua_url_text = Text(frame, height=3, width=50)
+        self.ua_url_text.insert(1.0, self.ua_urls_text_value)
+        self.ua_url_text.grid(row=8, column=1, columnspan=2, sticky="nsew", padx=5)
+        frame.rowconfigure(8, weight=1)
 
         button_frame = Frame(self.top)
         button_frame.pack(fill=BOTH, pady=(0, 10))
@@ -826,6 +833,11 @@ class DataFileEditor:
         blocked_path = self.blocked_var.get().strip()
         asset_path = self.asset_var.get().strip()
         account_path = self.account_store_var.get().strip()
+        ua_urls = [
+            line.strip()
+            for line in self.ua_url_text.get("1.0", END).splitlines()
+            if line.strip()
+        ]
 
         if not invalid_path or not binding_path:
             messagebox.showerror(
@@ -866,6 +878,7 @@ class DataFileEditor:
             blocked_applicants=self._normalize_path(blocked_path),
             part_asset_dir=self._normalize_path(asset_path),
             account_store=self._normalize_path(account_path),
+            ua_lookup_urls=ua_urls,
         )
 
         try:
@@ -3459,11 +3472,13 @@ class PartAssetManager:
         *,
         part_lookup: Callable[[str], str] | None = None,
         system_part_provider: Callable[[], SystemPartRepository | None] | None = None,
+        ua_lookup_urls: list[str] | None = None,
         on_close: Callable[[], None] | None = None,
     ):
         self.store = store
         self.part_lookup = part_lookup or (lambda _p: "")
         self._system_part_provider = system_part_provider
+        self._ua_lookup_urls = ua_lookup_urls or []
         self.on_close = on_close
         self.selected_part: str | None = None
         self.current_asset: PartAsset | None = None
@@ -3471,7 +3486,9 @@ class PartAssetManager:
         self.crawl_progress_var = StringVar(value="进度：0/0")
         self._image_preview_photo: ImageTk.PhotoImage | None = None
         self.crawler = AssetCrawler(
-            store.root, description_lookup=self._lookup_system_description
+            store.root,
+            description_lookup=self._lookup_system_description,
+            ua_lookup_urls=self._ua_lookup_urls,
         )
         self._crawl_thread: threading.Thread | None = None
         self._crawl_error: Exception | None = None
@@ -3479,6 +3496,8 @@ class PartAssetManager:
         self._can_manage = True
         self._managed_buttons: list[Button] = []
         self._managed_texts: list[Text] = []
+        self._desc_cache: dict[str, str] = {}
+        self.category_var = StringVar()
 
         self.top = Toplevel(master)
         self.top.title("料号资源维护")
@@ -3494,7 +3513,8 @@ class PartAssetManager:
         self._part_validator = self.top.register(self._validate_part_no)
 
         self._build_ui()
-        self._load_assets()
+        self._refresh_category_options()
+        self.top.after(50, self._load_assets)
 
     def _build_ui(self) -> None:
         main = Frame(self.top)
@@ -3632,11 +3652,24 @@ class PartAssetManager:
             crawler_frame, text="刷新进度", command=self._refresh_crawl_status
         )
         refresh_btn.grid(row=2, column=3, sticky="w", padx=(6, 4), pady=(4, 0))
+        Label(crawler_frame, text="按分类加入：").grid(row=3, column=0, sticky="e", padx=(0, 4))
+        self.category_combo = ttk.Combobox(
+            crawler_frame,
+            textvariable=self.category_var,
+            state="readonly",
+            width=20,
+        )
+        self.category_combo.grid(row=3, column=1, sticky="w", padx=(0, 6))
+        category_btn = Button(
+            crawler_frame, text="加入分类料号", command=self._queue_category_assets
+        )
+        category_btn.grid(row=3, column=2, sticky="w")
+        self._managed_buttons.append(category_btn)
         Label(crawler_frame, textvariable=self.crawl_progress_var, anchor="w").grid(
-            row=3, column=0, columnspan=4, sticky="w", padx=5
+            row=4, column=0, columnspan=4, sticky="w", padx=5, pady=(4, 0)
         )
         status_container = Frame(crawler_frame)
-        status_container.grid(row=4, column=0, columnspan=4, sticky="nsew", padx=5, pady=(4, 6))
+        status_container.grid(row=5, column=0, columnspan=4, sticky="nsew", padx=5, pady=(4, 6))
         crawl_scroll = Scrollbar(status_container)
         crawl_scroll.pack(side=RIGHT, fill=Y)
         self.crawl_status_list = Listbox(
@@ -3657,30 +3690,64 @@ class PartAssetManager:
         crawler_frame.columnconfigure(1, weight=1)
         crawler_frame.columnconfigure(2, weight=1)
         crawler_frame.columnconfigure(3, weight=1)
-        crawler_frame.rowconfigure(4, weight=1)
+        crawler_frame.rowconfigure(5, weight=1)
 
     def show_all_assets(self) -> None:
         self.search_var.set("")
         self._load_assets()
 
+    def _refresh_category_options(self) -> None:
+        categories = self._available_categories()
+        if hasattr(self, "category_combo"):
+            self.category_combo["values"] = categories
+            if categories and not self.category_var.get():
+                self.category_var.set(categories[0])
+
+    def _available_categories(self) -> list[str]:
+        repository = self._system_part_provider() if self._system_part_provider else None
+        if not repository:
+            return []
+        seen: set[str] = set()
+        categories: list[str] = []
+        for record in repository.records:
+            for category in record.categories:
+                if category not in seen:
+                    seen.add(category)
+                    categories.append(category)
+        return sorted(categories)
+
     def _lookup_system_description(self, part_no: str) -> str:
+        normalized = normalize_part_no(part_no) or part_no
+        if normalized in self._desc_cache:
+            return self._desc_cache[normalized]
         repository = self._system_part_provider() if self._system_part_provider else None
         if not repository:
             return ""
         record = repository.find(part_no)
-        return record.description if record else ""
+        desc = record.description if record else ""
+        self._desc_cache[normalized] = desc
+        return desc
 
     def _filtered_assets(self) -> list[tuple[PartAsset, str]]:
         query = self.search_var.get().strip().lower()
         assets: list[tuple[PartAsset, str]] = []
         for asset in self.store.list_assets():
-            desc = self.part_lookup(asset.part_no)
+            desc = self._get_description(asset.part_no)
             if query and query not in asset.part_no.lower() and query not in (desc or "").lower():
                 continue
             assets.append((asset, desc))
         return assets
 
+    def _get_description(self, part_no: str) -> str:
+        normalized = normalize_part_no(part_no) or part_no
+        if normalized in self._desc_cache:
+            return self._desc_cache[normalized]
+        desc = self.part_lookup(part_no)
+        self._desc_cache[normalized] = desc
+        return desc
+
     def _load_assets(self) -> None:
+        self._refresh_category_options()
         self.asset_listbox.delete(0, END)
         self._asset_index: list[str] = []
         for asset, desc in self._filtered_assets():
@@ -3717,7 +3784,7 @@ class PartAssetManager:
             asset = PartAsset(part_no=normalize_part_no(part_no) or part_no)
         self.current_asset = asset
         self.part_var.set(part_no or "")
-        self.desc_var.set(self.part_lookup(part_no) if part_no else "")
+        self.desc_var.set(self._get_description(part_no) if part_no else "")
         self.model_var.set(asset.model_file if asset else "")
         self.image_list.delete(0, END)
         for rel in asset.images if asset else []:
@@ -3971,14 +4038,34 @@ class PartAssetManager:
             missing_parts.append(normalized)
         self._add_crawl_tasks(missing_parts, "系统料号中没有未维护的料号。")
 
+    def _queue_category_assets(self) -> None:
+        if not self._ensure_manageable():
+            return
+        category = self.category_var.get().strip()
+        repository = self._system_part_provider() if self._system_part_provider else None
+        if not repository:
+            messagebox.showerror(
+                "缺少配置", "请先在数据文件设置中配置系统料号文件。", **self._dialog_kwargs
+            )
+            return
+        if not category:
+            messagebox.showinfo("提示", "请选择分类后再加入队列。", **self._dialog_kwargs)
+            return
+        parts = [record.part_no for record in repository.records if category in record.categories]
+        self._add_crawl_tasks(parts, "所选分类没有匹配的料号。")
+
     def _add_crawl_tasks(self, part_numbers: list[str], empty_message: str) -> None:
         if not self._ensure_manageable():
             return
         normalized: list[str] = []
         seen: set[str] = set()
+        skipped_ub: list[str] = []
         for part in part_numbers:
             normalized_part = normalize_part_no(part)
             if not normalized_part or normalized_part in seen:
+                continue
+            if normalized_part.startswith("UB"):
+                skipped_ub.append(normalized_part)
                 continue
             seen.add(normalized_part)
             normalized.append(normalized_part)
@@ -3987,8 +4074,11 @@ class PartAssetManager:
             return
         self.crawler.add_tasks(normalized)
         self._refresh_crawl_status()
+        suffix = "" if not skipped_ub else f"（已跳过 {len(skipped_ub)} 个 UB 料号）"
         messagebox.showinfo(
-            "已加入", "料号已加入生成队列，可随时开始生成。", **self._dialog_kwargs
+            "已加入",
+            f"料号已加入生成队列，可随时开始生成。{suffix}",
+            **self._dialog_kwargs,
         )
 
     def _refresh_crawl_status(self) -> None:
