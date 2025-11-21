@@ -5,5 +5,6 @@
   "system_part_db": "系统料号.xlsx",
   "blocked_applicants": "屏蔽申请人.txt",
   "part_asset_dir": "料号资源",
-  "account_store": "accounts.json"
+  "account_store": "accounts.json",
+  "ua_lookup_urls": []
 }
