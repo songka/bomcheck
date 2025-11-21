@@ -16,7 +16,7 @@ DEFAULT_CONFIG = {
     "blocked_applicants": "屏蔽申请人.txt",
     "part_asset_dir": "料号资源",
     "account_store": "accounts.json",
-    "ua_lookup_urls": [],
+    "ua_lookup_dir": "",
 }
 
 
@@ -29,7 +29,7 @@ class AppConfig:
     blocked_applicants: Path
     part_asset_dir: Path
     account_store: Path
-    ua_lookup_urls: list[str]
+    ua_lookup_dir: Path | None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], base_dir: Path) -> "AppConfig":
@@ -62,7 +62,9 @@ class AppConfig:
                 data.get("account_store") or DEFAULT_CONFIG["account_store"],
                 base_dir,
             ),
-            ua_lookup_urls=_normalize_url_list(data.get("ua_lookup_urls")),
+            ua_lookup_dir=_resolve_optional_path(
+                data.get("ua_lookup_dir"), base_dir
+            ),
         )
 
     def to_dict(self, base_dir: Path) -> Dict[str, str]:
@@ -74,7 +76,9 @@ class AppConfig:
             "blocked_applicants": _to_relative(self.blocked_applicants, base_dir),
             "part_asset_dir": _to_relative(self.part_asset_dir, base_dir),
             "account_store": _to_relative(self.account_store, base_dir),
-            "ua_lookup_urls": list(self.ua_lookup_urls),
+            "ua_lookup_dir": _to_relative(self.ua_lookup_dir, base_dir)
+            if self.ua_lookup_dir
+            else "",
         }
 
 
@@ -131,6 +135,12 @@ def _resolve_path(value: str | None, base_dir: Path) -> Path:
     return p
 
 
+def _resolve_optional_path(value: str | None, base_dir: Path) -> Path | None:
+    if not value:
+        return None
+    return _resolve_path(value, base_dir)
+
+
 def _to_relative(path: Path, base_dir: Path) -> str:
     try:
         return str(path.relative_to(base_dir))
@@ -147,13 +157,3 @@ def _strip_json_comments(text: str) -> str:
 
 def _remove_trailing_commas(text: str) -> str:
     return re.sub(r",(\s*[}\]])", r"\1", text)
-
-
-def _normalize_url_list(value: Any) -> list[str]:
-    if not value:
-        return []
-    if isinstance(value, str):
-        return [item.strip() for item in value.splitlines() if item.strip()]
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    return []

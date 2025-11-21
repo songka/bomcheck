@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import re
 import time
@@ -10,6 +11,7 @@ from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from openpyxl import load_workbook
 
 from .excel_processor import normalize_part_no
 from .part_assets import PartAsset, PartAssetStore
@@ -50,17 +52,13 @@ class AssetCrawler:
         progress_path: Optional[Path] = None,
         delay_seconds: float = 1.0,
         description_lookup: Optional[Callable[[str], str]] = None,
-        ua_lookup_urls: Optional[Iterable[str]] = None,
+        ua_lookup_dir: Optional[Path] = None,
     ) -> None:
         self.store = PartAssetStore(asset_root)
         self.progress_path = progress_path or (asset_root / "crawl_progress.json")
         self.delay_seconds = delay_seconds
         self._description_lookup = description_lookup
-        self._ua_lookup_urls = [
-            url.strip()
-            for url in ua_lookup_urls or []
-            if url and self._is_http_url(url.strip())
-        ]
+        self._ua_lookup_dir = ua_lookup_dir if ua_lookup_dir and ua_lookup_dir.exists() else None
         self._tasks: Dict[str, CrawlStatus] = {}
         self._load_progress()
 
@@ -210,26 +208,23 @@ class AssetCrawler:
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
     def _update_from_ua_sources(self, part_no: str) -> list[str]:
-        if not self._ua_lookup_urls:
+        if not self._ua_lookup_dir or not self._ua_lookup_dir.exists():
             return []
 
         found_remote: list[str] = []
         found_local: list[str] = []
-        for url in self._ua_lookup_urls:
-            try:
-                response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
-                response.raise_for_status()
-            except Exception:
+        for path in self._ua_lookup_dir.rglob("*"):
+            if not path.is_file():
                 continue
-
-            try:
-                found_remote.extend(self._search_links_in_json(response.json(), part_no))
-                found_local.extend(self._search_local_paths_in_json(response.json(), part_no))
-            except Exception:
-                pass
-
-            found_remote.extend(self._search_links_in_response(response.text, part_no))
-            found_local.extend(self._search_local_paths_in_response(response.text, part_no))
+            suffix = path.suffix.lower()
+            if suffix in {".xlsx", ".xlsm", ".xls"}:
+                local, remote = self._search_in_excel(path, part_no)
+            elif suffix in {".csv", ".txt"}:
+                local, remote = self._search_in_csv(path, part_no)
+            else:
+                continue
+            found_local.extend(local)
+            found_remote.extend(remote)
 
         updates: list[str] = []
         found_remote = list(dict.fromkeys(found_remote))
@@ -258,76 +253,67 @@ class AssetCrawler:
 
         return updates
 
-    def _search_links_in_response(self, text: str, part_no: str) -> list[str]:
-        soup = BeautifulSoup(text, "html.parser")
-        matches: list[str] = []
-        normalized = part_no.lower()
-        for link in soup.find_all("a"):
-            content = " ".join(link.stripped_strings).lower()
-            href = link.get("href", "").strip()
-            if normalized in content or normalized in href.lower():
-                if href and self._is_http_url(href) and href not in matches:
-                    matches.append(href)
-        return matches
+    def _search_in_excel(self, path: Path, part_no: str) -> tuple[list[str], list[str]]:
+        local: list[str] = []
+        remote: list[str] = []
+        normalized = normalize_part_no(part_no) or part_no
+        try:
+            workbook = load_workbook(path, data_only=True, read_only=True)
+        except Exception:
+            return local, remote
 
-    def _search_links_in_json(self, payload, part_no: str) -> list[str]:
-        results: list[str] = []
-        normalized = part_no.lower()
-        if isinstance(payload, dict):
-            contains_part = any(
-                normalize_part_no(str(value)).lower() == normalized
-                for value in payload.values()
-                if isinstance(value, (str, int, float))
-            )
-            for value in payload.values():
-                results.extend(self._search_links_in_json(value, part_no))
-            if contains_part:
-                for value in payload.values():
-                    if isinstance(value, str) and self._is_http_url(value) and value not in results:
-                        results.append(value)
-        elif isinstance(payload, list):
-            for item in payload:
-                results.extend(self._search_links_in_json(item, part_no))
-        elif isinstance(payload, str):
-            if normalized in payload.lower() and self._is_http_url(payload) and payload not in results:
-                results.append(payload)
-        return results
+        try:
+            for sheet in workbook.worksheets:
+                for row in sheet.iter_rows(values_only=True):
+                    if not row:
+                        continue
+                    if any(self._cell_contains_part(cell, normalized) for cell in row):
+                        local.append(str(path))
+                        remote.extend(self._extract_http_links(row))
+                        break
+        finally:
+            workbook.close()
 
-    def _search_local_paths_in_response(self, text: str, part_no: str) -> list[str]:
-        normalized = part_no.lower()
-        matches: list[str] = []
-        for line in text.splitlines():
-            lower = line.lower()
-            if normalized not in lower:
+        return local, remote
+
+    def _search_in_csv(self, path: Path, part_no: str) -> tuple[list[str], list[str]]:
+        local: list[str] = []
+        remote: list[str] = []
+        normalized = normalize_part_no(part_no) or part_no
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                reader = csv.reader(handle)
+                for row in reader:
+                    if not row:
+                        continue
+                    if any(self._cell_contains_part(cell, normalized) for cell in row):
+                        local.append(str(path))
+                        remote.extend(self._extract_http_links(row))
+                        break
+        except Exception:
+            return local, remote
+
+        return local, remote
+
+    def _cell_contains_part(self, value, normalized_part: str) -> bool:
+        if value is None:
+            return False
+        text = str(value).strip()
+        normalized_value = normalize_part_no(text) or text
+        lower_value = normalized_value.lower()
+        lower_part = normalized_part.lower()
+        return lower_part == lower_value or lower_part in lower_value
+
+    def _extract_http_links(self, values: Iterable) -> list[str]:
+        links: list[str] = []
+        for value in values:
+            if value is None:
                 continue
-            for candidate in re.findall(r"(\\\\[^\s\"]+|/[\w./-]+)", line):
-                cleaned = candidate.strip()
-                if cleaned and cleaned not in matches:
-                    matches.append(cleaned)
-        return matches
-
-    def _search_local_paths_in_json(self, payload, part_no: str) -> list[str]:
-        results: list[str] = []
-        normalized = part_no.lower()
-        if isinstance(payload, dict):
-            contains_part = any(
-                normalize_part_no(str(value)).lower() == normalized
-                for value in payload.values()
-                if isinstance(value, (str, int, float))
-            )
-            for value in payload.values():
-                results.extend(self._search_local_paths_in_json(value, part_no))
-            if contains_part:
-                for value in payload.values():
-                    if isinstance(value, str) and not self._is_http_url(value) and value not in results:
-                        results.append(value)
-        elif isinstance(payload, list):
-            for item in payload:
-                results.extend(self._search_local_paths_in_json(item, part_no))
-        elif isinstance(payload, str):
-            if normalized in payload.lower() and not self._is_http_url(payload) and payload not in results:
-                results.append(payload)
-        return results
+            for match in re.findall(r"https?://[^\s]+", str(value)):
+                cleaned = match.strip().rstrip(",.;)\"]")
+                if cleaned and cleaned not in links:
+                    links.append(cleaned)
+        return links
 
 
 def _extract_brand_model(description: str) -> tuple[str | None, str | None]:

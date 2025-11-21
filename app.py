@@ -524,7 +524,7 @@ class Application:
             self.part_asset_store,
             part_lookup=self._lookup_system_part_desc,
             system_part_provider=self._get_system_part_repository,
-            ua_lookup_urls=self.config.ua_lookup_urls,
+            ua_lookup_dir=self.config.ua_lookup_dir,
             on_close=lambda: setattr(self, "part_asset_manager", None),
         )
         self.part_asset_manager.update_permission(self._is_allowed("asset"))
@@ -705,7 +705,7 @@ class DataFileEditor:
         self.blocked_var = StringVar(value=str(config.blocked_applicants))
         self.asset_var = StringVar(value=str(config.part_asset_dir))
         self.account_store_var = StringVar(value=str(config.account_store))
-        self.ua_urls_text_value = "\n".join(config.ua_lookup_urls)
+        self.ua_dir_var = StringVar(value=str(config.ua_lookup_dir or ""))
         self._dialog_kwargs = {"parent": self.top}
 
         self._build_ui()
@@ -780,11 +780,14 @@ class DataFileEditor:
             text_var=self.account_store_var,
             filetypes=[("账户", "*.json"), ("所有文件", "*.*")],
         )
-        Label(frame, text="UA 成品网址（每行一个）：").grid(row=8, column=0, sticky="nw", pady=5)
-        self.ua_url_text = Text(frame, height=3, width=50)
-        self.ua_url_text.insert(1.0, self.ua_urls_text_value)
-        self.ua_url_text.grid(row=8, column=1, columnspan=2, sticky="nsew", padx=5)
-        frame.rowconfigure(8, weight=1)
+        self._build_file_selector(
+            frame,
+            row=8,
+            label_text="UA 成品资料目录：",
+            text_var=self.ua_dir_var,
+            filetypes=[("目录", "*.*")],
+            is_directory=True,
+        )
 
         button_frame = Frame(self.top)
         button_frame.pack(fill=BOTH, pady=(0, 10))
@@ -833,11 +836,7 @@ class DataFileEditor:
         blocked_path = self.blocked_var.get().strip()
         asset_path = self.asset_var.get().strip()
         account_path = self.account_store_var.get().strip()
-        ua_urls = [
-            line.strip()
-            for line in self.ua_url_text.get("1.0", END).splitlines()
-            if line.strip()
-        ]
+        ua_dir = self.ua_dir_var.get().strip()
 
         if not invalid_path or not binding_path:
             messagebox.showerror(
@@ -869,6 +868,11 @@ class DataFileEditor:
                 "保存失败", "请填写账号密码文件路径。", **self._dialog_kwargs
             )
             return
+        if ua_dir and not Path(ua_dir).exists():
+            messagebox.showerror(
+                "保存失败", "请填写有效的 UA 成品资料目录。", **self._dialog_kwargs
+            )
+            return
 
         new_config = AppConfig(
             invalid_part_db=self._normalize_path(invalid_path),
@@ -878,7 +882,7 @@ class DataFileEditor:
             blocked_applicants=self._normalize_path(blocked_path),
             part_asset_dir=self._normalize_path(asset_path),
             account_store=self._normalize_path(account_path),
-            ua_lookup_urls=ua_urls,
+            ua_lookup_dir=self._normalize_path(ua_dir) if ua_dir else None,
         )
 
         try:
@@ -3472,13 +3476,13 @@ class PartAssetManager:
         *,
         part_lookup: Callable[[str], str] | None = None,
         system_part_provider: Callable[[], SystemPartRepository | None] | None = None,
-        ua_lookup_urls: list[str] | None = None,
+        ua_lookup_dir: Path | None = None,
         on_close: Callable[[], None] | None = None,
     ):
         self.store = store
         self.part_lookup = part_lookup or (lambda _p: "")
         self._system_part_provider = system_part_provider
-        self._ua_lookup_urls = ua_lookup_urls or []
+        self._ua_lookup_dir = ua_lookup_dir
         self.on_close = on_close
         self.selected_part: str | None = None
         self.current_asset: PartAsset | None = None
@@ -3488,7 +3492,7 @@ class PartAssetManager:
         self.crawler = AssetCrawler(
             store.root,
             description_lookup=self._lookup_system_description,
-            ua_lookup_urls=self._ua_lookup_urls,
+            ua_lookup_dir=self._ua_lookup_dir,
         )
         self._crawl_thread: threading.Thread | None = None
         self._crawl_error: Exception | None = None
