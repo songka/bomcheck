@@ -23,8 +23,10 @@ class SystemPartRecord:
 
     @property
     def categories(self) -> tuple[str, ...]:
+        categories: list[str] = [_categorize_part_no(self.part_no)]
         parts = [segment.strip() for segment in self.description.split(";") if segment.strip()]
-        return tuple(parts) if parts else ("未分类",)
+        categories.extend(parts)
+        return tuple(categories) if categories else ("未分类",)
 
     @property
     def inventory_display(self) -> str:
@@ -196,6 +198,21 @@ def _parse_excel(path: Path) -> list[SystemPartRecord]:
         records.append(SystemPartRecord(part_no, description, unit, applicant, inventory))
     workbook.close()
     return records
+
+
+def _categorize_part_no(part_no: str) -> str:
+    normalized = normalize_part_no(part_no)
+    if normalized.startswith("UC1"):
+        return "加工件"
+    if normalized.startswith("UC2"):
+        return "机构外购件"
+    if normalized.startswith("UC3"):
+        return "电控外购件"
+    if normalized.startswith("UA"):
+        return "成品"
+    if normalized.startswith("UB"):
+        return "半成品"
+    return "未分类"
 
 
 def _convert_inventory(value) -> float | None:
