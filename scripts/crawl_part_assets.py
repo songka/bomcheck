@@ -56,13 +56,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="本次最多处理多少个任务，便于分批执行",
     )
+    parser.add_argument(
+        "--ua-dir",
+        type=Path,
+        default=None,
+        help="UA 成品资料目录，自动生成成品资源时会在该目录下查找",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     parts: Iterable[str] = args.parts or read_parts(args.parts_file)
-    crawler = AssetCrawler(args.asset_root, args.progress, delay_seconds=args.delay)
+    crawler = AssetCrawler(
+        args.asset_root,
+        args.progress,
+        delay_seconds=args.delay,
+        ua_lookup_dir=args.ua_dir,
+    )
     crawler.add_tasks(parts)
     pending = crawler.pending()
     if not pending:
