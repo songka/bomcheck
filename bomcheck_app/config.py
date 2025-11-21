@@ -9,12 +9,12 @@ from typing import Any, Dict
 
 
 DEFAULT_CONFIG = {
-    "invalid_part_db": "失效料号.xlsx",
-    "binding_library": "绑定料号.js",
-    "important_materials": "重要物料.txt",
-    "system_part_db": "系统料号.xlsx",
-    "blocked_applicants": "屏蔽申请人.txt",
-    "part_asset_dir": "料号资源",
+    "invalid_part_db": "\\10.97.0.210\lfaf_Engineer\电控历史资料\7-内部运算公式\12失效料号查询系统\数据库\失效料号.xlsx",
+    "binding_library": "\\10.97.0.210\lfaf_Engineer\电控历史资料\7-内部运算公式\12失效料号查询系统\数据库\绑定料号.js",
+    "important_materials": "\\10.97.0.210\lfaf_Engineer\电控历史资料\7-内部运算公式\12失效料号查询系统\数据库\重要物料.txt",
+    "system_part_db": "\\10.97.0.210\lfaf_Engineer\电控历史资料\7-内部运算公式\12失效料号查询系统\数据库\系统物料.xlsx",
+    "blocked_applicants": "\\10.97.0.210\lfaf_Engineer\电控历史资料\7-内部运算公式\12失效料号查询系统\数据库\屏蔽申请人.txt",
+    "part_asset_dir": "\\10.97.0.210\lfaf_Engineer\电控历史资料\7-内部运算公式\12失效料号查询系统\数据库\料号资源",
     "account_store": "accounts.json",
     "ua_lookup_dir": "",
 }
