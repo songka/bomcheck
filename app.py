@@ -282,8 +282,7 @@ class Application:
                 self.reload_config_btn.pack_forget()
             except Exception:
                 pass
-            if self._is_admin() or self.current_user:
-                self.reload_config_btn.pack(side=LEFT, padx=5)
+            self.reload_config_btn.pack(side=LEFT, padx=5)
 
     def _is_admin(self) -> bool:
         return bool(self.current_user and self.current_user.is_admin)
