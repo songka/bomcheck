@@ -138,7 +138,7 @@ def generate_system_part_exports(
     seen_parts: set[str] = set()
     for record in records:
         normalized_part = normalize_part_no(record.part_no)
-        if not normalized_part.startswith("UC3"):
+        if not normalized_part.startswith("U"):
             continue
         if normalized_part in invalid_part_numbers:
             continue
