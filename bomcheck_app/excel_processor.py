@@ -1184,15 +1184,34 @@ def _build_description_matcher(expression: str) -> Callable[[str], bool]:
     if not postfix:
         return lambda desc: False
 
+    keyword_patterns: Dict[str, Optional[re.Pattern[str]]] = {}
+    for item in postfix:
+        if not (isinstance(item, tuple) and item[0] == "KW"):
+            continue
+        keyword = item[1]
+        if keyword in keyword_patterns:
+            continue
+        if keyword and keyword.isalnum():
+            keyword_patterns[keyword] = re.compile(rf"\b{re.escape(keyword)}\b")
+        else:
+            keyword_patterns[keyword] = None
+
     def _match(desc: str) -> bool:
-        if not desc:
+        normalized_desc = normalize_text(desc)
+        if not normalized_desc:
             return False
-        desc_lower = desc.lower()
         stack: List[bool] = []
         for item in postfix:
             if isinstance(item, tuple) and item[0] == "KW":
                 keyword = item[1]
-                stack.append(keyword in desc_lower)
+                if not keyword:
+                    stack.append(False)
+                else:
+                    pattern = keyword_patterns.get(keyword)
+                    if pattern:
+                        stack.append(bool(pattern.search(normalized_desc)))
+                    else:
+                        stack.append(keyword in normalized_desc)
             elif item == "AND":
                 if len(stack) < 2:
                     return False
@@ -1241,7 +1260,7 @@ def _to_postfix(tokens: List[str]) -> List[object]:
                 output.append(operators.pop())
             operators.append(current)
         else:
-            output.append(("KW", lowered))
+            output.append(("KW", normalize_text(raw)))
 
     while operators:
         op = operators.pop()
@@ -1252,10 +1271,12 @@ def _to_postfix(tokens: List[str]) -> List[object]:
 
 
 def _normalize_description_symbols(expression: str) -> str:
-    translation = {chr(code): chr(code - 0xFEE0) for code in range(0xFF01, 0xFF5F)}
-    translation.update({
-        "｜": "|",
-        "￤": "|",
-        "＆": "&",
-    })
+    translation = {code: chr(code - 0xFEE0) for code in range(0xFF01, 0xFF5F)}
+    translation.update(
+        {
+            ord("｜"): "|",
+            ord("￤"): "|",
+            ord("＆"): "&",
+        }
+    )
     return expression.translate(translation)
