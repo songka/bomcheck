@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import sys
 import threading
 import traceback
@@ -35,7 +36,7 @@ from tkinter import ttk
 
 import csv
 from openpyxl import Workbook, load_workbook
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from bomcheck_app.auth import AccountStore, PERMISSION_LABELS, UserAccount
 from bomcheck_app.binding_library import BindingChoice, BindingGroup, BindingLibrary, BindingProject
@@ -48,7 +49,7 @@ from bomcheck_app.excel_processor import (
 )
 from bomcheck_app.models import ExecutionResult
 from bomcheck_app.part_assets import PartAsset, PartAssetStore, open_file
-from bomcheck_app.asset_crawler import AssetCrawler
+from bomcheck_app.asset_crawler import AssetCrawler, CrawlStatus
 from bomcheck_app.system_parts import (
     SystemPartRecord,
     SystemPartRepository,
@@ -3585,6 +3586,14 @@ class PartAssetManager:
         self.category_var = StringVar()
         self._last_geometry: str | None = None
         self._is_zoomed = False
+        self._cancel_crawl = threading.Event()
+        self._awaiting_cancel_decision = False
+        self._crawl_cancelled = False
+        self._crawl_backup_assets: dict[str, PartAsset] | None = None
+        self._crawl_backup_tasks: dict[str, CrawlStatus] | None = None
+        self._crawl_backup_files: set[Path] | None = None
+        self._icon_minimize: ImageTk.PhotoImage | None = None
+        self._icon_restore: ImageTk.PhotoImage | None = None
 
         self.top = Toplevel(master)
         self.top.title("料号资源维护")
@@ -3599,22 +3608,47 @@ class PartAssetManager:
 
         self._part_validator = self.top.register(self._validate_part_no)
 
+        self._create_window_icons()
         self._build_ui()
         self._refresh_category_options()
         position_window_near_cursor(self.top)
         self.top.after(50, self._load_assets)
 
+    def _create_window_icons(self) -> None:
+        def _icon(draw_fn: Callable[[ImageDraw.ImageDraw], None]) -> ImageTk.PhotoImage:
+            img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            draw_fn(draw)
+            return ImageTk.PhotoImage(img)
+
+        self._icon_minimize = _icon(
+            lambda draw: draw.line((4, 10, 12, 10), fill="#444", width=2)
+        )
+        self._icon_restore = _icon(
+            lambda draw: draw.rectangle((4, 4, 12, 12), outline="#444", width=2)
+        )
+
     def _build_ui(self) -> None:
         control_bar = Frame(self.top)
         control_bar.pack(fill=BOTH, padx=10, pady=(6, 0))
-        Button(control_bar, text="最小化", command=self._minimize_window).pack(
-            side=RIGHT, padx=(4, 0)
-        )
         Button(
             control_bar,
-            text="最大化/还原",
+            image=self._icon_restore,
             command=self._toggle_maximize,
-        ).pack(side=RIGHT)
+            relief="flat",
+            bd=0,
+            padx=2,
+            pady=2,
+        ).pack(side=RIGHT, padx=(2, 0))
+        Button(
+            control_bar,
+            image=self._icon_minimize,
+            command=self._minimize_window,
+            relief="flat",
+            bd=0,
+            padx=2,
+            pady=2,
+        ).pack(side=RIGHT, padx=(2, 0))
 
         main = Frame(self.top)
         main.pack(fill=BOTH, expand=True, padx=10, pady=10)
@@ -3724,7 +3758,7 @@ class PartAssetManager:
         crawler_frame.pack(fill=BOTH, pady=(0, 5))
         Label(crawler_frame, text="料号列表（每行一个）：").grid(row=0, column=0, sticky="nw")
         self.crawl_queue = Text(crawler_frame, height=3, width=40)
-        self.crawl_queue.grid(row=0, column=1, columnspan=3, sticky="we", padx=5, pady=4)
+        self.crawl_queue.grid(row=0, column=1, columnspan=4, sticky="we", padx=5, pady=4)
         self._managed_texts.append(self.crawl_queue)
         queue_btn = Button(crawler_frame, text="加入队列", command=self._queue_crawl_tasks)
         queue_btn.grid(row=1, column=1, sticky="w", padx=(5, 6))
@@ -3732,10 +3766,13 @@ class PartAssetManager:
         crawl_btn = Button(crawler_frame, text="开始生成", command=self._start_crawl)
         crawl_btn.grid(row=1, column=2, sticky="w")
         self._managed_buttons.append(crawl_btn)
+        stop_btn = Button(crawler_frame, text="终止生成", command=self._stop_crawl)
+        stop_btn.grid(row=1, column=3, sticky="w", padx=(6, 4))
+        self._managed_buttons.append(stop_btn)
         queue_filter_btn = Button(
             crawler_frame, text="加入搜索结果", command=self._queue_filtered_assets
         )
-        queue_filter_btn.grid(row=1, column=3, sticky="w", padx=(6, 4))
+        queue_filter_btn.grid(row=1, column=4, sticky="w", padx=(2, 4))
         self._managed_buttons.append(queue_filter_btn)
         queue_all_btn = Button(
             crawler_frame, text="加入全部已维护", command=self._queue_all_assets
@@ -3789,6 +3826,7 @@ class PartAssetManager:
         crawler_frame.columnconfigure(1, weight=1)
         crawler_frame.columnconfigure(2, weight=1)
         crawler_frame.columnconfigure(3, weight=1)
+        crawler_frame.columnconfigure(4, weight=1)
         crawler_frame.rowconfigure(5, weight=1)
 
     def _minimize_window(self) -> None:
@@ -4274,14 +4312,39 @@ class PartAssetManager:
                 "处理中", "生成任务正在执行中，请稍候。", **self._dialog_kwargs
             )
             return
+        self._cancel_crawl.clear()
+        self._awaiting_cancel_decision = False
+        self._crawl_cancelled = False
+        self._crawl_backup_assets = copy.deepcopy(self.store.assets)
+        self._crawl_backup_tasks = copy.deepcopy(self.crawler._tasks)
+        try:
+            self._crawl_backup_files = {
+                path for path in self.store.root.rglob("*") if path.is_file()
+            }
+        except Exception:
+            self._crawl_backup_files = None
         self._crawl_error = None
         self._crawl_thread = threading.Thread(target=self._run_crawler, daemon=True)
         self._crawl_thread.start()
         self._poll_crawl_progress()
 
+    def _stop_crawl(self) -> None:
+        if not self._crawl_thread or not self._crawl_thread.is_alive():
+            messagebox.showinfo("提示", "当前没有正在执行的生成任务。", **self._dialog_kwargs)
+            return
+        self._awaiting_cancel_decision = True
+        self._cancel_crawl.set()
+        messagebox.showinfo(
+            "正在终止",
+            "正在尝试终止生成，请稍候并选择是否保留已生成的内容。",
+            **self._dialog_kwargs,
+        )
+
     def _run_crawler(self) -> None:
         try:
-            self.crawler.run()
+            self._crawl_cancelled = self.crawler.run(
+                should_cancel=self._cancel_crawl.is_set
+            )
         except Exception as exc:  # noqa: BLE001 - user feedback
             self._crawl_error = exc
 
@@ -4294,8 +4357,52 @@ class PartAssetManager:
             messagebox.showerror(
                 "生成失败", f"自动生成失败：{self._crawl_error}", **self._dialog_kwargs
             )
+        elif self._awaiting_cancel_decision and self._crawl_cancelled:
+            self._handle_crawl_cancel()
         else:
             self._refresh_crawl_status()
+
+    def _handle_crawl_cancel(self) -> None:
+        self._awaiting_cancel_decision = False
+        keep_changes = messagebox.askyesno(
+            "生成已终止",
+            "是否保留终止前已生成的内容？选择“否”将撤销本次自动生成中的更新。",
+            **self._dialog_kwargs,
+        )
+        if not keep_changes:
+            self._rollback_crawl_updates()
+            messagebox.showinfo("已撤销", "本次生成的内容未保存。", **self._dialog_kwargs)
+        else:
+            messagebox.showinfo("已保留", "已保留终止前生成的内容。", **self._dialog_kwargs)
+        self._refresh_crawl_status()
+        self._cancel_crawl = threading.Event()
+        self._crawl_backup_assets = None
+        self._crawl_backup_tasks = None
+        self._crawl_backup_files = None
+
+    def _rollback_crawl_updates(self) -> None:
+        if self._crawl_backup_assets is not None:
+            self.store.assets = copy.deepcopy(self._crawl_backup_assets)
+            try:
+                self.store.save()
+            except Exception:
+                pass
+        if self._crawl_backup_files is not None:
+            try:
+                current_files = {path for path in self.store.root.rglob("*") if path.is_file()}
+                for path in current_files - self._crawl_backup_files:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        if self._crawl_backup_tasks is not None:
+            self.crawler._tasks = copy.deepcopy(self._crawl_backup_tasks)
+            try:
+                self.crawler._save_progress()
+            except Exception:
+                pass
 
     def _validate_part_no(self, value: str) -> bool:
         return len(value) <= 15

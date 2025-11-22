@@ -110,9 +110,13 @@ class AssetCrawler:
     def pending(self) -> List[str]:
         return [p for p, task in self._tasks.items() if task.status != "done"]
 
-    def run(self, limit: Optional[int] = None) -> None:
+    def run(self, limit: Optional[int] = None, should_cancel=None) -> bool:
         processed = 0
+        cancelled = False
         for part_no in list(self.pending()):
+            if should_cancel and should_cancel():
+                cancelled = True
+                break
             if limit is not None and processed >= limit:
                 break
             status = self._tasks[part_no]
@@ -128,6 +132,7 @@ class AssetCrawler:
             processed += 1
             if self.delay_seconds:
                 time.sleep(self.delay_seconds)
+        return cancelled
 
     def statuses(self) -> List[CrawlStatus]:
         return sorted(self._tasks.values(), key=lambda item: item.part_no)
@@ -142,10 +147,8 @@ class AssetCrawler:
         if normalized.startswith("UB"):
             return "UB 料号无需自动生成，已跳过"
 
-        asset = self.store.get(part_no) or PartAsset(part_no=part_no)
-        self.store.upsert(asset)
-
         updates: list[str] = []
+        existing_asset = self.store.get(part_no)
 
         description = self._lookup_description(part_no)
         brand, model = _extract_brand_model(description)
@@ -157,13 +160,14 @@ class AssetCrawler:
             primary_keyword = " ".join(filter(None, (brand, model))) or part_no
             official = self._search_official_site(primary_keyword)
             if official:
+                asset = existing_asset or PartAsset(part_no=part_no)
                 updated_links = list(asset.remote_links)
                 if official not in updated_links:
                     updated_links.append(official)
                     self.store.set_remote_links(part_no, updated_links)
                     updates.append("官网链接")
 
-        if not asset.images:
+        if not (existing_asset.images if existing_asset else []):
             for keyword in search_terms:
                 image_path = self.store.download_first_image_from_search(part_no, keyword)
                 if image_path:
@@ -171,7 +175,9 @@ class AssetCrawler:
                     break
 
         if not updates:
-            return "已存在资源，未更新"
+            if existing_asset:
+                return "已存在资源，未更新"
+            return "未找到可保存的资源"
         return f"已更新 {', '.join(updates)}"
 
     def _lookup_description(self, part_no: str) -> str:
@@ -294,7 +300,10 @@ class AssetCrawler:
             if not text or self._is_http_url(text):
                 continue
             if "\\" in text or "/" in text:
-                cleaned = text.replace("\\\\", "\\").strip()
+                cleaned = text
+                if cleaned.startswith("\\") and not cleaned.startswith("\\\\"):
+                    cleaned = "\\" + cleaned
+                cleaned = cleaned.strip()
                 if cleaned and cleaned not in paths:
                     paths.append(cleaned)
         return paths
