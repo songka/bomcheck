@@ -57,31 +57,42 @@ class SystemPartRepository:
     def load(self) -> None:
         if not self.path.exists():
             raise FileNotFoundError(f"系统料号文件不存在：{self.path}")
-
-        workbook = load_workbook(self.path, data_only=True, read_only=True)
-        sheet = workbook.active
-        records: list[SystemPartRecord] = []
+        source = self._prefer_fast_path()
+        records = _parse_system_parts(source)
         index: dict[str, SystemPartRecord] = {}
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            if not row:
+        normalized_records: list[SystemPartRecord] = []
+        for record in records:
+            normalized = normalize_part_no(record.part_no)
+            if not normalized:
                 continue
-            part_no = _safe_str(row[0])
-            description = _safe_str(row[1])
-            unit = _safe_str(row[2])
-            applicant = _clean_applicant_text(_safe_str(row[3]))
-            inventory_value = row[4] if len(row) > 4 else None
-            if not part_no:
-                continue
-            inventory = _convert_inventory(inventory_value)
-            record = SystemPartRecord(part_no, description, unit, applicant, inventory)
-            records.append(record)
-            normalized = normalize_part_no(part_no)
-            if normalized and normalized not in index:
+            normalized_records.append(record)
+            if normalized not in index:
                 index[normalized] = record
 
-        workbook.close()
-        self.records = records
+        self.records = normalized_records
         self._index = index
+
+    def _prefer_fast_path(self) -> Path:
+        suffix = self.path.suffix.lower()
+        if suffix in {".xlsx", ".xlsm"}:
+            cached = self.path.with_suffix(".tsv")
+            try:
+                if (not cached.exists()) or cached.stat().st_mtime < self.path.stat().st_mtime:
+                    self._convert_excel_to_tsv(self.path, cached)
+                return cached
+            except Exception:
+                return self.path
+        return self.path
+
+    def _convert_excel_to_tsv(self, source: Path, destination: Path) -> None:
+        workbook = load_workbook(source, data_only=True, read_only=True)
+        sheet = workbook.active
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle, delimiter="\t")
+            for row in sheet.iter_rows(values_only=True):
+                writer.writerow(["" if cell is None else cell for cell in row])
+        workbook.close()
 
     def find(self, part_no: str) -> SystemPartRecord | None:
         normalized = normalize_part_no(part_no)
@@ -178,15 +189,27 @@ def _parse_tsv(path: Path) -> list[SystemPartRecord]:
     with path.open("r", encoding="utf-8") as handle:
         reader = csv.reader(handle, delimiter="\t")
         for row in reader:
-            if len(row) < 11:
+            if not row:
                 continue
-            part_no = _safe_str(row[1])
-            description = _safe_str(row[3])
+            if _safe_str(row[0]).lower() in {"料号", "part_no"}:
+                continue
+            if len(row) >= 11:
+                part_no = _safe_str(row[1])
+                description = _safe_str(row[3])
+                unit = _safe_str(row[6])
+                applicant = _clean_applicant_text(_safe_str(row[9]))
+                inventory_raw = row[10]
+            elif len(row) >= 5:
+                part_no = _safe_str(row[0])
+                description = _safe_str(row[1])
+                unit = _safe_str(row[2])
+                applicant = _clean_applicant_text(_safe_str(row[3]))
+                inventory_raw = row[4]
+            else:
+                continue
             if not part_no:
                 continue
-            unit = _safe_str(row[6])
-            applicant = _clean_applicant_text(_safe_str(row[9]))
-            inventory = _convert_inventory(row[10])
+            inventory = _convert_inventory(inventory_raw)
             records.append(SystemPartRecord(part_no, description, unit, applicant, inventory))
     return records
 
