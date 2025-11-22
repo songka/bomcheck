@@ -57,31 +57,42 @@ class SystemPartRepository:
     def load(self) -> None:
         if not self.path.exists():
             raise FileNotFoundError(f"系统料号文件不存在：{self.path}")
-
-        workbook = load_workbook(self.path, data_only=True, read_only=True)
-        sheet = workbook.active
-        records: list[SystemPartRecord] = []
+        source = self._prefer_fast_path()
+        records = _parse_system_parts(source)
         index: dict[str, SystemPartRecord] = {}
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            if not row:
+        normalized_records: list[SystemPartRecord] = []
+        for record in records:
+            normalized = normalize_part_no(record.part_no)
+            if not normalized:
                 continue
-            part_no = _safe_str(row[0])
-            description = _safe_str(row[1])
-            unit = _safe_str(row[2])
-            applicant = _clean_applicant_text(_safe_str(row[3]))
-            inventory_value = row[4] if len(row) > 4 else None
-            if not part_no:
-                continue
-            inventory = _convert_inventory(inventory_value)
-            record = SystemPartRecord(part_no, description, unit, applicant, inventory)
-            records.append(record)
-            normalized = normalize_part_no(part_no)
-            if normalized and normalized not in index:
+            normalized_records.append(record)
+            if normalized not in index:
                 index[normalized] = record
 
-        workbook.close()
-        self.records = records
+        self.records = normalized_records
         self._index = index
+
+    def _prefer_fast_path(self) -> Path:
+        suffix = self.path.suffix.lower()
+        if suffix in {".xlsx", ".xlsm"}:
+            cached = self.path.with_suffix(".tsv")
+            try:
+                if (not cached.exists()) or cached.stat().st_mtime < self.path.stat().st_mtime:
+                    self._convert_excel_to_tsv(self.path, cached)
+                return cached
+            except Exception:
+                return self.path
+        return self.path
+
+    def _convert_excel_to_tsv(self, source: Path, destination: Path) -> None:
+        workbook = load_workbook(source, data_only=True, read_only=True)
+        sheet = workbook.active
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle, delimiter="\t")
+            for row in sheet.iter_rows(values_only=True):
+                writer.writerow(["" if cell is None else cell for cell in row])
+        workbook.close()
 
     def find(self, part_no: str) -> SystemPartRecord | None:
         normalized = normalize_part_no(part_no)
@@ -110,11 +121,11 @@ class SystemPartRepository:
         return [record for record in self.records if _matches_query(record, keywords)]
 
 
-def generate_system_part_excel(
+def generate_system_part_exports(
     source_path: Path,
     invalid_part_path: Path,
     blocked_applicant_path: Path,
-) -> Path:
+) -> tuple[Path, Path]:
     if not source_path.exists():
         raise FileNotFoundError(f"找不到系统料号原始文件：{source_path}")
 
@@ -131,7 +142,7 @@ def generate_system_part_excel(
             continue
         if normalized_part in invalid_part_numbers:
             continue
-        if _should_block(record.applicant, blocked_applicants):
+        if _should_block(record, blocked_applicants):
             continue
         if normalized_part in seen_parts:
             continue
@@ -143,12 +154,30 @@ def generate_system_part_excel(
         destination = source_path.with_name(source_path.name + ".xlsx")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
+    _write_excel(filtered_records, destination)
+    fast_path = destination.with_suffix(".tsv")
+    _write_tsv(filtered_records, fast_path)
+    return destination, fast_path
+
+
+def generate_system_part_excel(
+    source_path: Path,
+    invalid_part_path: Path,
+    blocked_applicant_path: Path,
+) -> Path:
+    excel_path, _ = generate_system_part_exports(
+        source_path, invalid_part_path, blocked_applicant_path
+    )
+    return excel_path
+
+
+def _write_excel(records: list[SystemPartRecord], destination: Path) -> None:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "系统料号"
     sheet.append(["料号", "描述", "单位", "申请人", "库存"])
 
-    for record in filtered_records:
+    for record in records:
         sheet.append(
             [
                 record.part_no,
@@ -161,7 +190,22 @@ def generate_system_part_excel(
 
     workbook.save(destination)
     workbook.close()
-    return destination
+
+
+def _write_tsv(records: list[SystemPartRecord], destination: Path) -> None:
+    with destination.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerow(["料号", "描述", "单位", "申请人", "库存"])
+        for record in records:
+            writer.writerow(
+                [
+                    record.part_no,
+                    record.description,
+                    record.unit,
+                    record.applicant,
+                    _format_inventory_cell(record.inventory),
+                ]
+            )
 
 
 def _parse_system_parts(path: Path) -> list[SystemPartRecord]:
@@ -178,15 +222,27 @@ def _parse_tsv(path: Path) -> list[SystemPartRecord]:
     with path.open("r", encoding="utf-8") as handle:
         reader = csv.reader(handle, delimiter="\t")
         for row in reader:
-            if len(row) < 11:
+            if not row:
                 continue
-            part_no = _safe_str(row[1])
-            description = _safe_str(row[3])
+            if _safe_str(row[0]).lower() in {"料号", "part_no"}:
+                continue
+            if len(row) >= 11:
+                part_no = _safe_str(row[1])
+                description = _safe_str(row[3])
+                unit = _safe_str(row[6])
+                applicant = _clean_applicant_text(_safe_str(row[9]))
+                inventory_raw = row[10]
+            elif len(row) >= 5:
+                part_no = _safe_str(row[0])
+                description = _safe_str(row[1])
+                unit = _safe_str(row[2])
+                applicant = _clean_applicant_text(_safe_str(row[3]))
+                inventory_raw = row[4]
+            else:
+                continue
             if not part_no:
                 continue
-            unit = _safe_str(row[6])
-            applicant = _clean_applicant_text(_safe_str(row[9]))
-            inventory = _convert_inventory(row[10])
+            inventory = _convert_inventory(inventory_raw)
             records.append(SystemPartRecord(part_no, description, unit, applicant, inventory))
     return records
 
@@ -275,10 +331,10 @@ def _load_blocked_applicants(path: Path) -> "BlockedApplicantMatcher":
     return matcher
 
 
-def _should_block(applicant: str, blocked: "BlockedApplicantMatcher") -> bool:
-    if not applicant:
+def _should_block(record: SystemPartRecord, blocked: "BlockedApplicantMatcher") -> bool:
+    if not blocked:
         return False
-    return blocked.matches(applicant)
+    return blocked.matches(record.applicant, record.description)
 
 
 def _matches_query(record: SystemPartRecord, keywords: list[set[str]]) -> bool:
@@ -331,6 +387,7 @@ def _clean_applicant_text(value: str) -> str:
 class BlockedApplicantMatcher:
     def __init__(self) -> None:
         self._variant_lengths: dict[str, set[int]] = {}
+        self._description_tokens: set[str] = set()
 
     def add(self, value: str) -> None:
         if value is None:
@@ -338,13 +395,22 @@ class BlockedApplicantMatcher:
         cleaned = value.strip()
         if not cleaned:
             return
+        if cleaned[0] in {"-", "－", "–", "—"}:
+            target = cleaned[1:].strip()
+            for variant in normalized_variants(target):
+                if variant:
+                    self._description_tokens.add(variant)
+            return
         length = len(cleaned)
         for variant in normalized_variants(cleaned):
             if not variant:
                 continue
             self._variant_lengths.setdefault(variant, set()).add(length)
 
-    def matches(self, applicant: str) -> bool:
+    def matches(self, applicant: str, description: str | None = None) -> bool:
+        if description and self._description_tokens:
+            if self._matches_description(description):
+                return True
         if not self._variant_lengths or not applicant:
             return False
         for token in _split_applicant_tokens(applicant):
@@ -357,6 +423,17 @@ class BlockedApplicantMatcher:
                     if 2 in lengths:
                         return True
                 else:
+                    return True
+        return False
+
+    def _matches_description(self, description: str) -> bool:
+        variants = normalized_variants(description)
+        base = description.strip().lower()
+        if base:
+            variants.add(base)
+        for text in variants:
+            for token in self._description_tokens:
+                if token and token in text:
                     return True
         return False
 
