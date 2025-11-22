@@ -687,7 +687,11 @@ class ExcelProcessor:
                 for index_key, index_display in index_candidates
             ]
 
-            if not candidate_entries and not project.index_part_no:
+            if (
+                not candidate_entries
+                and not project.index_part_no
+                and not (project.index_part_desc or "").strip()
+            ):
                 group_candidates = self._resolve_group_based_candidates(
                     project, part_quantities, part_display
                 )
