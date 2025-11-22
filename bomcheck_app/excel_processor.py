@@ -677,17 +677,45 @@ class ExcelProcessor:
             index_candidates = self._resolve_index_candidates(
                 project, part_desc, part_display
             )
-            if not index_candidates:
-                debug_logs.append(f"[绑定]{project.project_desc} 未找到索引料号或描述匹配，跳过")
+
+            candidate_entries: List[Tuple[str, str, float]] = [
+                (
+                    index_key,
+                    index_display,
+                    part_quantities.get(index_key, 0.0),
+                )
+                for index_key, index_display in index_candidates
+            ]
+
+            if not candidate_entries and not project.index_part_no:
+                group_candidates = self._resolve_group_based_candidates(
+                    project, part_quantities, part_display
+                )
+                if group_candidates:
+                    candidate_entries.extend(group_candidates)
+                    debug_logs.append(
+                        f"[绑定]{project.project_desc} 未设置索引料号，按分组可选料号匹配到 "
+                        f"{len(group_candidates)} 个主料"
+                    )
+
+            if not candidate_entries:
+                debug_logs.append(
+                    f"[绑定]{project.project_desc} 未找到索引料号或描述匹配，跳过"
+                )
                 continue
 
-            for index_key, index_display in index_candidates:
-                project_qty = part_quantities.get(index_key, 0.0)
+            for index_key, index_display, project_qty in candidate_entries:
                 if project_qty <= 0:
+                    debug_logs.append(
+                        f"[绑定]{project.project_desc}({index_display}) 主料数量为 0，跳过"
+                    )
                     continue
 
                 available_index_qty = available_inventory.get(index_key, 0.0)
                 if available_index_qty <= 0:
+                    debug_logs.append(
+                        f"[绑定]{project.project_desc}({index_display}) 库存为 0，跳过"
+                    )
                     continue
 
                 consumption_qty = min(project_qty, available_index_qty)
@@ -893,6 +921,42 @@ class ExcelProcessor:
             seen.add(part_no)
             unique_matches.append((part_no, display_no))
         return unique_matches
+
+    def _resolve_group_based_candidates(
+        self,
+        project,
+        part_quantities: Dict[str, float],
+        part_display: Dict[str, str],
+    ) -> List[Tuple[str, str, float]]:
+        candidates: List[Tuple[str, str, float]] = []
+        seen: set[str] = set()
+
+        for group in project.required_groups:
+            for choice in group.choices:
+                if not choice.part_no:
+                    continue
+
+                part_key = normalize_part_no(choice.part_no)
+                if not part_key or part_key in seen:
+                    continue
+
+                if not self._choice_condition_met(choice, part_quantities):
+                    continue
+
+                qty = part_quantities.get(part_key, 0.0)
+                if qty <= 0:
+                    continue
+
+                seen.add(part_key)
+                candidates.append(
+                    (
+                        part_key,
+                        part_display.get(part_key, choice.part_no),
+                        qty,
+                    )
+                )
+
+        return candidates
 
     def _scan_important_materials(
         self,
@@ -1147,8 +1211,9 @@ def _build_description_matcher(expression: str) -> Callable[[str], bool]:
 
 
 def _tokenize_description_expression(expression: str) -> List[str]:
-    pattern = re.compile(r"\(|\)|(?i:and)|(?i:or)|[^()\s]+")
-    return [token for token in pattern.findall(expression) if token and token.strip()]
+    normalized = _normalize_description_symbols(expression)
+    pattern = re.compile(r"\(|\)|&|\||(?i:and)|(?i:or)|[^()&|\s]+")
+    return [token for token in pattern.findall(normalized) if token and token.strip()]
 
 
 def _to_postfix(tokens: List[str]) -> List[object]:
@@ -1165,6 +1230,11 @@ def _to_postfix(tokens: List[str]) -> List[object]:
                 output.append(operators.pop())
             if operators and operators[-1] == "(":
                 operators.pop()
+        elif raw in ("&", "|"):
+            current = "AND" if raw == "&" else "OR"
+            while operators and operators[-1] != "(" and precedence[operators[-1]] >= precedence[current]:
+                output.append(operators.pop())
+            operators.append(current)
         elif lowered in ("and", "or"):
             current = "AND" if lowered == "and" else "OR"
             while operators and operators[-1] != "(" and precedence[operators[-1]] >= precedence[current]:
@@ -1179,3 +1249,13 @@ def _to_postfix(tokens: List[str]) -> List[object]:
             output.append(op)
 
     return output
+
+
+def _normalize_description_symbols(expression: str) -> str:
+    translation = {chr(code): chr(code - 0xFEE0) for code in range(0xFF01, 0xFF5F)}
+    translation.update({
+        "｜": "|",
+        "￤": "|",
+        "＆": "&",
+    })
+    return expression.translate(translation)
