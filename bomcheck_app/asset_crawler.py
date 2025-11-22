@@ -157,6 +157,7 @@ class AssetCrawler:
 
         updates: list[str] = []
         existing_asset = self.store.get(part_no)
+        should_overwrite_uc = normalized.startswith("UC") and existing_asset is not None
 
         description = self._lookup_description(part_no)
         brand, model = _extract_brand_model(description)
@@ -169,9 +170,13 @@ class AssetCrawler:
             official = self._search_official_site(primary_keyword)
             if official:
                 asset = existing_asset or PartAsset(part_no=part_no)
-                updated_links = list(asset.remote_links)
-                if official not in updated_links:
-                    updated_links.append(official)
+                if should_overwrite_uc:
+                    updated_links = [official]
+                else:
+                    updated_links = list(asset.remote_links)
+                    if official not in updated_links:
+                        updated_links.append(official)
+                if updated_links != asset.remote_links:
                     self.store.set_remote_links(part_no, updated_links)
                     updates.append("官网链接")
 
@@ -179,6 +184,17 @@ class AssetCrawler:
             for keyword in search_terms:
                 image_path = self.store.download_first_image_from_search(part_no, keyword)
                 if image_path:
+                    updates.append("图片")
+                    break
+
+        elif should_overwrite_uc:
+            for keyword in search_terms:
+                image_path = self.store.download_first_image_from_search(part_no, keyword)
+                if image_path:
+                    asset = self.store.get(part_no)
+                    if asset:
+                        asset.images = [image_path]
+                        self.store.upsert(asset)
                     updates.append("图片")
                     break
 
