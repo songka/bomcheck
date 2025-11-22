@@ -64,7 +64,16 @@ def _resource_path(relative: str) -> Path:
     return Path(__file__).resolve().parent / relative
 
 
-CONFIG_PATH = _resource_path("config.json")
+def _default_config_path() -> Path:
+    remote_path = Path(
+        r"\\10.97.0.210\lfaf_Engineer\电控历史资料\7-内部运算公式\12失效料号查询系统\数据库\config.json"
+    )
+    if remote_path.exists():
+        return remote_path
+    return _resource_path("config.json")
+
+
+CONFIG_PATH = _default_config_path()
 
 
 def position_window_near_cursor(window: Tk | Toplevel, offset: int = 24) -> None:
