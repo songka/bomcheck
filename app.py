@@ -116,6 +116,7 @@ class Application:
         self.selected_file: Path | None = None
         self._execution_lock = threading.Lock()
         self._execution_thread: threading.Thread | None = None
+        self._config_reload_thread: threading.Thread | None = None
         self._build_ui()
         self._refresh_config_entry()
         self._refresh_controlled_buttons()
@@ -338,25 +339,43 @@ class Application:
         if self.part_asset_manager:
             self.part_asset_manager.update_permission(self._is_allowed("asset"))
 
-    def _apply_config(self, path: Path) -> None:
+    def _prepare_config(self, path: Path) -> dict:
         config = load_config(path)
         binding_library = BindingLibrary(config.binding_library)
         binding_library.load()
         processor = ExcelProcessor(config)
         part_asset_store = PartAssetStore(config.part_asset_dir)
-        previous_user = self.current_user
         account_store = AccountStore(config.account_store)
+        previous_user = self.current_user
+        restored_user = None
+        if previous_user:
+            candidate = account_store.accounts.get(previous_user.username)
+            if candidate and candidate.password_hash == previous_user.password_hash:
+                restored_user = candidate
+        return {
+            "config": config,
+            "binding_library": binding_library,
+            "processor": processor,
+            "part_asset_store": part_asset_store,
+            "account_store": account_store,
+            "restored_user": restored_user,
+        }
+
+    def _apply_config(self, path: Path, prepared: dict | None = None) -> None:
+        if prepared is None:
+            prepared = self._prepare_config(path)
+        config: AppConfig = prepared["config"]
+        binding_library: BindingLibrary = prepared["binding_library"]
+        processor: ExcelProcessor = prepared["processor"]
+        part_asset_store: PartAssetStore = prepared["part_asset_store"]
+        account_store: AccountStore = prepared["account_store"]
+        restored_user = prepared.get("restored_user")
         self.config_path = path
         self.config = config
         self.binding_library = binding_library
         self.processor = processor
         self.part_asset_store = part_asset_store
         self.account_store = account_store
-        restored_user = None
-        if previous_user:
-            candidate = account_store.accounts.get(previous_user.username)
-            if candidate and candidate.password_hash == previous_user.password_hash:
-                restored_user = candidate
         self._set_current_user(restored_user)
         self.system_part_path = config.system_part_db
         self.system_part_repository = None
@@ -377,12 +396,44 @@ class Application:
             self.config_entry.config(state="readonly")
 
     def _reload_config(self) -> None:
-        try:
-            self._apply_config(self.config_path)
-        except Exception as exc:  # pragma: no cover - user feedback
-            messagebox.showerror("加载失败", f"重新加载配置失败：{exc}")
-        else:
+        if self._config_reload_thread and self._config_reload_thread.is_alive():
+            messagebox.showinfo("提示", "配置正在重新加载中，请稍候。")
+            return
+
+        def _finish_reload(result: dict | None = None, error: Exception | None = None) -> None:
+            if hasattr(self, "reload_config_btn"):
+                try:
+                    self.reload_config_btn.config(state="normal", text="重新加载")
+                except Exception:
+                    pass
+            self._config_reload_thread = None
+            if error:
+                messagebox.showerror("加载失败", f"重新加载配置失败：{error}")
+                return
+            if result is not None:
+                try:
+                    self._apply_config(self.config_path, result)
+                except Exception as exc:  # pragma: no cover - user feedback
+                    messagebox.showerror("加载失败", f"重新加载配置失败：{exc}")
+                    return
             messagebox.showinfo("配置已更新", f"已重新加载：{self.config_path}")
+
+        def _worker() -> None:
+            try:
+                prepared = self._prepare_config(self.config_path)
+            except Exception as exc:  # noqa: BLE001 - background feedback
+                self.root.after(0, lambda: _finish_reload(None, exc))
+                return
+            self.root.after(0, lambda: _finish_reload(prepared, None))
+
+        try:
+            if hasattr(self, "reload_config_btn"):
+                self.reload_config_btn.config(state="disabled", text="正在重新加载…")
+        except Exception:
+            pass
+        thread = threading.Thread(target=_worker, daemon=True)
+        self._config_reload_thread = thread
+        thread.start()
 
     def _open_data_file_editor(self) -> None:
         if not self._ensure_permission("admin"):

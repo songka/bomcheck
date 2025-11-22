@@ -82,14 +82,22 @@ class AssetCrawler:
         )
 
     def add_tasks(self, part_numbers: Iterable[str]) -> None:
+        changed = False
         for part in part_numbers:
             normalized = normalize_part_no(part)
             if not normalized:
                 continue
-            if normalized in self._tasks and self._tasks[normalized].status == "done":
+            existing = self._tasks.get(normalized)
+            if existing:
+                if existing.status == "done":
+                    existing.status = "pending"
+                    existing.message = ""
+                    changed = True
                 continue
-            self._tasks.setdefault(normalized, CrawlStatus(part_no=normalized))
-        self._save_progress()
+            self._tasks[normalized] = CrawlStatus(part_no=normalized)
+            changed = True
+        if changed:
+            self._save_progress()
 
     def remove_tasks(self, part_numbers: Iterable[str]) -> None:
         removed = False
