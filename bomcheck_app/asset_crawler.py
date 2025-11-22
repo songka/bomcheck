@@ -153,15 +153,15 @@ class AssetCrawler:
 
         if normalized.startswith("UA"):
             updates.extend(self._update_from_ua_sources(normalized))
-
-        primary_keyword = " ".join(filter(None, (brand, model))) or part_no
-        official = self._search_official_site(primary_keyword)
-        if official:
-            updated_links = list(asset.remote_links)
-            if official not in updated_links:
-                updated_links.append(official)
-                self.store.set_remote_links(part_no, updated_links)
-                updates.append("官网链接")
+        else:
+            primary_keyword = " ".join(filter(None, (brand, model))) or part_no
+            official = self._search_official_site(primary_keyword)
+            if official:
+                updated_links = list(asset.remote_links)
+                if official not in updated_links:
+                    updated_links.append(official)
+                    self.store.set_remote_links(part_no, updated_links)
+                    updates.append("官网链接")
 
         if not asset.images:
             for keyword in search_terms:
@@ -211,34 +211,21 @@ class AssetCrawler:
         if not self._ua_lookup_dir or not self._ua_lookup_dir.exists():
             return []
 
-        found_remote: list[str] = []
         found_local: list[str] = []
         for path in self._ua_lookup_dir.rglob("*"):
             if not path.is_file():
                 continue
             suffix = path.suffix.lower()
             if suffix in {".xlsx", ".xlsm", ".xls"}:
-                local, remote = self._search_in_excel(path, part_no)
+                local = self._search_in_excel(path, part_no)
             elif suffix in {".csv", ".txt"}:
-                local, remote = self._search_in_csv(path, part_no)
+                local = self._search_in_csv(path, part_no)
             else:
                 continue
             found_local.extend(local)
-            found_remote.extend(remote)
 
         updates: list[str] = []
-        found_remote = list(dict.fromkeys(found_remote))
         found_local = list(dict.fromkeys(found_local))
-        if found_remote:
-            asset = self.store.get(part_no) or PartAsset(part_no=part_no)
-            existing_remote = set(asset.remote_links)
-            merged_remote = list(existing_remote)
-            for link in found_remote:
-                if link not in existing_remote:
-                    merged_remote.append(link)
-            if merged_remote != list(existing_remote):
-                self.store.set_remote_links(part_no, merged_remote)
-                updates.append("UA链接")
 
         if found_local:
             asset = self.store.get(part_no) or PartAsset(part_no=part_no)
@@ -253,14 +240,13 @@ class AssetCrawler:
 
         return updates
 
-    def _search_in_excel(self, path: Path, part_no: str) -> tuple[list[str], list[str]]:
+    def _search_in_excel(self, path: Path, part_no: str) -> list[str]:
         local: list[str] = []
-        remote: list[str] = []
         normalized = normalize_part_no(part_no) or part_no
         try:
             workbook = load_workbook(path, data_only=True, read_only=True)
         except Exception:
-            return local, remote
+            return local
 
         try:
             for sheet in workbook.worksheets:
@@ -268,17 +254,14 @@ class AssetCrawler:
                     if not row:
                         continue
                     if any(self._cell_contains_part(cell, normalized) for cell in row):
-                        local.append(str(path))
-                        remote.extend(self._extract_http_links(row))
-                        break
+                        local.extend(self._extract_local_paths_from_row(row))
         finally:
             workbook.close()
 
-        return local, remote
+        return local
 
-    def _search_in_csv(self, path: Path, part_no: str) -> tuple[list[str], list[str]]:
+    def _search_in_csv(self, path: Path, part_no: str) -> list[str]:
         local: list[str] = []
-        remote: list[str] = []
         normalized = normalize_part_no(part_no) or part_no
         try:
             with path.open("r", encoding="utf-8", errors="ignore") as handle:
@@ -287,13 +270,11 @@ class AssetCrawler:
                     if not row:
                         continue
                     if any(self._cell_contains_part(cell, normalized) for cell in row):
-                        local.append(str(path))
-                        remote.extend(self._extract_http_links(row))
-                        break
+                        local.extend(self._extract_local_paths_from_row(row))
         except Exception:
-            return local, remote
+            return local
 
-        return local, remote
+        return local
 
     def _cell_contains_part(self, value, normalized_part: str) -> bool:
         if value is None:
@@ -303,6 +284,20 @@ class AssetCrawler:
         lower_value = normalized_value.lower()
         lower_part = normalized_part.lower()
         return lower_part == lower_value or lower_part in lower_value
+
+    def _extract_local_paths_from_row(self, values: Iterable) -> list[str]:
+        paths: list[str] = []
+        for value in values:
+            if value is None:
+                continue
+            text = str(value).strip()
+            if not text or self._is_http_url(text):
+                continue
+            if "\\" in text or "/" in text:
+                cleaned = text.replace("\\\\", "\\").strip()
+                if cleaned and cleaned not in paths:
+                    paths.append(cleaned)
+        return paths
 
     def _extract_http_links(self, values: Iterable) -> list[str]:
         links: list[str] = []
