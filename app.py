@@ -54,6 +54,7 @@ from bomcheck_app.system_parts import (
     SystemPartRecord,
     SystemPartRepository,
     generate_system_part_excel,
+    generate_system_part_exports,
 )
 
 def _resource_path(relative: str) -> Path:
@@ -1036,16 +1037,20 @@ class DataFileEditor:
             blocked.touch()
 
         try:
-            output_path = generate_system_part_excel(source, invalid, blocked)
+            excel_path, fast_path = generate_system_part_exports(
+                source, invalid, blocked
+            )
         except Exception as exc:
             messagebox.showerror(
                 "处理失败", f"系统料号处理失败：{exc}", **self._dialog_kwargs
             )
             return
 
-        self.system_part_var.set(str(output_path))
+        self.system_part_var.set(str(fast_path))
         messagebox.showinfo(
-            "完成", f"系统料号Excel已生成：{output_path}", **self._dialog_kwargs
+            "完成",
+            f"系统料号Excel已生成：{excel_path}\n已同步生成快速加载文件：{fast_path}",
+            **self._dialog_kwargs,
         )
 
     def _normalize_path(self, raw_path: str) -> Path:

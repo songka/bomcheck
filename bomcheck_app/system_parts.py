@@ -121,11 +121,11 @@ class SystemPartRepository:
         return [record for record in self.records if _matches_query(record, keywords)]
 
 
-def generate_system_part_excel(
+def generate_system_part_exports(
     source_path: Path,
     invalid_part_path: Path,
     blocked_applicant_path: Path,
-) -> Path:
+) -> tuple[Path, Path]:
     if not source_path.exists():
         raise FileNotFoundError(f"找不到系统料号原始文件：{source_path}")
 
@@ -142,7 +142,7 @@ def generate_system_part_excel(
             continue
         if normalized_part in invalid_part_numbers:
             continue
-        if _should_block(record.applicant, blocked_applicants):
+        if _should_block(record, blocked_applicants):
             continue
         if normalized_part in seen_parts:
             continue
@@ -154,12 +154,30 @@ def generate_system_part_excel(
         destination = source_path.with_name(source_path.name + ".xlsx")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
+    _write_excel(filtered_records, destination)
+    fast_path = destination.with_suffix(".tsv")
+    _write_tsv(filtered_records, fast_path)
+    return destination, fast_path
+
+
+def generate_system_part_excel(
+    source_path: Path,
+    invalid_part_path: Path,
+    blocked_applicant_path: Path,
+) -> Path:
+    excel_path, _ = generate_system_part_exports(
+        source_path, invalid_part_path, blocked_applicant_path
+    )
+    return excel_path
+
+
+def _write_excel(records: list[SystemPartRecord], destination: Path) -> None:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "系统料号"
     sheet.append(["料号", "描述", "单位", "申请人", "库存"])
 
-    for record in filtered_records:
+    for record in records:
         sheet.append(
             [
                 record.part_no,
@@ -172,7 +190,22 @@ def generate_system_part_excel(
 
     workbook.save(destination)
     workbook.close()
-    return destination
+
+
+def _write_tsv(records: list[SystemPartRecord], destination: Path) -> None:
+    with destination.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerow(["料号", "描述", "单位", "申请人", "库存"])
+        for record in records:
+            writer.writerow(
+                [
+                    record.part_no,
+                    record.description,
+                    record.unit,
+                    record.applicant,
+                    _format_inventory_cell(record.inventory),
+                ]
+            )
 
 
 def _parse_system_parts(path: Path) -> list[SystemPartRecord]:
@@ -298,10 +331,10 @@ def _load_blocked_applicants(path: Path) -> "BlockedApplicantMatcher":
     return matcher
 
 
-def _should_block(applicant: str, blocked: "BlockedApplicantMatcher") -> bool:
-    if not applicant:
+def _should_block(record: SystemPartRecord, blocked: "BlockedApplicantMatcher") -> bool:
+    if not blocked:
         return False
-    return blocked.matches(applicant)
+    return blocked.matches(record.applicant, record.description)
 
 
 def _matches_query(record: SystemPartRecord, keywords: list[set[str]]) -> bool:
@@ -354,6 +387,7 @@ def _clean_applicant_text(value: str) -> str:
 class BlockedApplicantMatcher:
     def __init__(self) -> None:
         self._variant_lengths: dict[str, set[int]] = {}
+        self._description_tokens: set[str] = set()
 
     def add(self, value: str) -> None:
         if value is None:
@@ -361,13 +395,22 @@ class BlockedApplicantMatcher:
         cleaned = value.strip()
         if not cleaned:
             return
+        if cleaned[0] in {"-", "－", "–", "—"}:
+            target = cleaned[1:].strip()
+            for variant in normalized_variants(target):
+                if variant:
+                    self._description_tokens.add(variant)
+            return
         length = len(cleaned)
         for variant in normalized_variants(cleaned):
             if not variant:
                 continue
             self._variant_lengths.setdefault(variant, set()).add(length)
 
-    def matches(self, applicant: str) -> bool:
+    def matches(self, applicant: str, description: str | None = None) -> bool:
+        if description and self._description_tokens:
+            if self._matches_description(description):
+                return True
         if not self._variant_lengths or not applicant:
             return False
         for token in _split_applicant_tokens(applicant):
@@ -380,6 +423,17 @@ class BlockedApplicantMatcher:
                     if 2 in lengths:
                         return True
                 else:
+                    return True
+        return False
+
+    def _matches_description(self, description: str) -> bool:
+        variants = normalized_variants(description)
+        base = description.strip().lower()
+        if base:
+            variants.add(base)
+        for text in variants:
+            for token in self._description_tokens:
+                if token and token in text:
                     return True
         return False
 
