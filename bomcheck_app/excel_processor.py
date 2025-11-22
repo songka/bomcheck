@@ -1189,21 +1189,28 @@ def _build_description_matcher(expression: str) -> Callable[[str], bool]:
         return lambda desc: False
 
     keyword_patterns: Dict[str, Optional[re.Pattern[str]]] = {}
+
+    def _is_ascii_keyword(value: str) -> bool:
+        return bool(value) and all(ord(ch) < 128 and ch.isalnum() for ch in value)
+
     for item in postfix:
         if not (isinstance(item, tuple) and item[0] == "KW"):
             continue
         keyword = item[1]
         if keyword in keyword_patterns:
             continue
-        if keyword:
-            keyword_patterns[keyword] = re.compile(re.escape(keyword))
+        if _is_ascii_keyword(keyword):
+            keyword_patterns[keyword] = re.compile(rf"\b{re.escape(keyword)}\b")
         else:
             keyword_patterns[keyword] = None
 
     def _match(desc: str) -> bool:
-        normalized_desc = normalize_text(desc)
+        normalized_desc = _normalize_description_symbols(normalize_text(desc))
         if not normalized_desc:
             return False
+
+        ascii_tokens = set(re.findall(r"[0-9a-zA-Z]+", normalized_desc))
+
         stack: List[bool] = []
         for item in postfix:
             if isinstance(item, tuple) and item[0] == "KW":
@@ -1213,7 +1220,7 @@ def _build_description_matcher(expression: str) -> Callable[[str], bool]:
                 else:
                     pattern = keyword_patterns.get(keyword)
                     if pattern:
-                        stack.append(bool(pattern.search(normalized_desc)))
+                        stack.append(keyword in ascii_tokens or bool(pattern.search(normalized_desc)))
                     else:
                         stack.append(keyword in normalized_desc)
             elif item == "AND":
