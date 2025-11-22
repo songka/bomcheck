@@ -3724,7 +3724,10 @@ class PartAssetManager:
         asset_scroll = Scrollbar(list_container)
         asset_scroll.pack(side=RIGHT, fill=Y)
         self.asset_listbox = Listbox(
-            list_container, width=30, yscrollcommand=asset_scroll.set
+            list_container,
+            width=30,
+            yscrollcommand=asset_scroll.set,
+            selectmode="extended",
         )
         self.asset_listbox.pack(side=LEFT, fill=Y, expand=True)
         asset_scroll.config(command=self.asset_listbox.yview)
@@ -4080,16 +4083,22 @@ class PartAssetManager:
     def _delete_asset(self) -> None:
         if not self._ensure_manageable():
             return
-        selection = self.asset_listbox.curselection()
-        if not selection:
+        indices = list(self.asset_listbox.curselection())
+        if not indices:
             return
-        index = selection[0]
-        part_no = self._asset_index[index]
-        if not messagebox.askyesno(
-            "确认", f"删除 {part_no} 的资源？", **self._dialog_kwargs
-        ):
+        part_nos = [self._asset_index[idx] for idx in indices if idx < len(self._asset_index)]
+        if not part_nos:
             return
-        self.store.remove(part_no)
+        preview = part_nos if len(part_nos) <= 3 else part_nos[:3] + ["..."]
+        prompt = (
+            f"删除 {part_nos[0]} 的资源？"
+            if len(part_nos) == 1
+            else f"删除选中的 {len(part_nos)} 个料号？\n" + ", ".join(preview)
+        )
+        if not messagebox.askyesno("确认", prompt, **self._dialog_kwargs):
+            return
+        for part_no in part_nos:
+            self.store.remove(part_no)
         self._load_assets()
         self._load_detail("")
 
