@@ -1211,8 +1211,9 @@ def _build_description_matcher(expression: str) -> Callable[[str], bool]:
 
 
 def _tokenize_description_expression(expression: str) -> List[str]:
-    pattern = re.compile(r"\(|\)|(?i:and)|(?i:or)|[^()\s]+")
-    return [token for token in pattern.findall(expression) if token and token.strip()]
+    normalized = _normalize_description_symbols(expression)
+    pattern = re.compile(r"\(|\)|&|\||(?i:and)|(?i:or)|[^()&|\s]+")
+    return [token for token in pattern.findall(normalized) if token and token.strip()]
 
 
 def _to_postfix(tokens: List[str]) -> List[object]:
@@ -1229,6 +1230,11 @@ def _to_postfix(tokens: List[str]) -> List[object]:
                 output.append(operators.pop())
             if operators and operators[-1] == "(":
                 operators.pop()
+        elif raw in ("&", "|"):
+            current = "AND" if raw == "&" else "OR"
+            while operators and operators[-1] != "(" and precedence[operators[-1]] >= precedence[current]:
+                output.append(operators.pop())
+            operators.append(current)
         elif lowered in ("and", "or"):
             current = "AND" if lowered == "and" else "OR"
             while operators and operators[-1] != "(" and precedence[operators[-1]] >= precedence[current]:
@@ -1243,3 +1249,13 @@ def _to_postfix(tokens: List[str]) -> List[object]:
             output.append(op)
 
     return output
+
+
+def _normalize_description_symbols(expression: str) -> str:
+    translation = {chr(code): chr(code - 0xFEE0) for code in range(0xFF01, 0xFF5F)}
+    translation.update({
+        "｜": "|",
+        "￤": "|",
+        "＆": "&",
+    })
+    return expression.translate(translation)
