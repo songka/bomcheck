@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from collections import defaultdict
 import json
 import re
 import time
@@ -60,9 +61,12 @@ class AssetCrawler:
         self._description_lookup = description_lookup
         self._ua_lookup_dir = ua_lookup_dir if ua_lookup_dir and ua_lookup_dir.exists() else None
         self._ua_sources: list[Path] = []
+        self._ua_index: dict[str, list[str]] = {}
+        self._ua_rows: list[tuple[str, list[str]]] = []
         self._tasks: Dict[str, CrawlStatus] = {}
         if self._ua_lookup_dir:
             self._ua_sources = self._collect_ua_sources(self._ua_lookup_dir)
+            self._ua_index, self._ua_rows = self._build_ua_index(self._ua_sources)
         self._load_progress()
 
     def _load_progress(self) -> None:
@@ -245,13 +249,15 @@ class AssetCrawler:
             return []
 
         found_local: list[str] = []
-        for path in self._ua_sources:
-            suffix = path.suffix.lower()
-            if suffix in {".xlsx", ".xlsm", ".xls"}:
-                local = self._search_in_excel(path, part_no)
-            elif suffix in {".csv", ".txt"}:
-                local = self._search_in_csv(path, part_no)
-            found_local.extend(local)
+        normalized = normalize_part_no(part_no) or part_no
+        direct_hits = self._ua_index.get(normalized)
+        if direct_hits:
+            found_local.extend(direct_hits)
+        if not found_local:
+            lower_part = normalized.lower()
+            for row_text, paths in self._ua_rows:
+                if lower_part in row_text:
+                    found_local.extend(paths)
 
         updates: list[str] = []
         found_local = list(dict.fromkeys(found_local))
@@ -304,6 +310,71 @@ class AssetCrawler:
             return local
 
         return local
+
+    def _build_ua_index(
+        self, sources: list[Path]
+    ) -> tuple[dict[str, list[str]], list[tuple[str, list[str]]]]:
+        index: dict[str, set[str]] = defaultdict(set)
+        rows: list[tuple[str, list[str]]] = []
+        for path in sources:
+            suffix = path.suffix.lower()
+            if suffix in {".xlsx", ".xlsm", ".xls"}:
+                rows.extend(self._collect_rows_from_excel(path, index))
+            elif suffix in {".csv", ".txt"}:
+                rows.extend(self._collect_rows_from_csv(path, index))
+        finalized_index = {key: sorted(values) for key, values in index.items()}
+        return finalized_index, rows
+
+    def _collect_rows_from_excel(
+        self, path: Path, index: dict[str, set[str]]
+    ) -> list[tuple[str, list[str]]]:
+        rows: list[tuple[str, list[str]]] = []
+        try:
+            workbook = load_workbook(path, data_only=True, read_only=True)
+        except Exception:
+            return rows
+
+        try:
+            for sheet in workbook.worksheets:
+                for row in sheet.iter_rows(values_only=True):
+                    cached = self._process_ua_row(row, index)
+                    if cached:
+                        rows.append(cached)
+        finally:
+            workbook.close()
+        return rows
+
+    def _collect_rows_from_csv(
+        self, path: Path, index: dict[str, set[str]]
+    ) -> list[tuple[str, list[str]]]:
+        rows: list[tuple[str, list[str]]] = []
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                reader = csv.reader(handle)
+                for row in reader:
+                    cached = self._process_ua_row(row, index)
+                    if cached:
+                        rows.append(cached)
+        except Exception:
+            return rows
+        return rows
+
+    def _process_ua_row(
+        self, values: Iterable, index: dict[str, set[str]]
+    ) -> tuple[str, list[str]] | None:
+        if not values:
+            return None
+        local_paths = self._extract_local_paths_from_row(values)
+        if not local_paths:
+            return None
+        combined_text = " ".join(str(value).strip() for value in values if value)
+        for value in values:
+            if value is None:
+                continue
+            normalized_value = normalize_part_no(str(value))
+            if normalized_value:
+                index[normalized_value].update(local_paths)
+        return combined_text.lower(), local_paths
 
     def _collect_ua_sources(self, root: Path) -> list[Path]:
         sources: list[Path] = []
