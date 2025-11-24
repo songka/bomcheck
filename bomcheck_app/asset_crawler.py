@@ -59,7 +59,10 @@ class AssetCrawler:
         self.delay_seconds = delay_seconds
         self._description_lookup = description_lookup
         self._ua_lookup_dir = ua_lookup_dir if ua_lookup_dir and ua_lookup_dir.exists() else None
+        self._ua_sources: list[Path] = []
         self._tasks: Dict[str, CrawlStatus] = {}
+        if self._ua_lookup_dir:
+            self._ua_sources = self._collect_ua_sources(self._ua_lookup_dir)
         self._load_progress()
 
     def _load_progress(self) -> None:
@@ -238,20 +241,16 @@ class AssetCrawler:
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
     def _update_from_ua_sources(self, part_no: str) -> list[str]:
-        if not self._ua_lookup_dir or not self._ua_lookup_dir.exists():
+        if not self._ua_sources:
             return []
 
         found_local: list[str] = []
-        for path in self._ua_lookup_dir.rglob("*"):
-            if not path.is_file():
-                continue
+        for path in self._ua_sources:
             suffix = path.suffix.lower()
             if suffix in {".xlsx", ".xlsm", ".xls"}:
                 local = self._search_in_excel(path, part_no)
             elif suffix in {".csv", ".txt"}:
                 local = self._search_in_csv(path, part_no)
-            else:
-                continue
             found_local.extend(local)
 
         updates: list[str] = []
@@ -305,6 +304,20 @@ class AssetCrawler:
             return local
 
         return local
+
+    def _collect_ua_sources(self, root: Path) -> list[Path]:
+        sources: list[Path] = []
+        supported = {".xlsx", ".xlsm", ".xls", ".csv", ".txt"}
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in supported:
+                continue
+            if path.name.startswith("~$"):
+                continue
+            sources.append(path)
+        sources.sort()
+        return sources
 
     def _cell_contains_part(self, value, normalized_part: str) -> bool:
         if value is None:
