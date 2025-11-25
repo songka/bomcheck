@@ -324,6 +324,11 @@ class ExcelProcessor:
             if part_col_idx is None:
                 continue
 
+            replacement_start_col = ws.max_column + 1
+            status_col = replacement_start_col
+            replacement_col = replacement_start_col + 1
+            replacement_desc_col = replacement_start_col + 2
+
             for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
                 if part_col_idx >= len(row):
                     continue
@@ -362,10 +367,12 @@ class ExcelProcessor:
                     cell.fill = BLACK_FILL
 
                 if replacement_no:
-                    replacement_col = ws.max_column + 1
+                    ws.cell(row=row_idx, column=status_col).value = "已失效"
                     ws.cell(row=row_idx, column=replacement_col).value = replacement_no
-                    ws.cell(row=row_idx, column=replacement_col + 1).value = replacement_desc
+                    ws.cell(row=row_idx, column=replacement_desc_col).value = replacement_desc
                     summary.total_replaced += 1
+                else:
+                    ws.cell(row=row_idx, column=status_col).value = "已失效"
 
                 summary.records.append(record)
 
