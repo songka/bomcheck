@@ -367,12 +367,12 @@ class ExcelProcessor:
                     cell.fill = BLACK_FILL
 
                 if replacement_no:
-                    ws.cell(row=row_idx, column=status_col).value = "已失效"
+                    ws.cell(row=row_idx, column=status_col).value = "已失效，已替换"
                     ws.cell(row=row_idx, column=replacement_col).value = replacement_no
                     ws.cell(row=row_idx, column=replacement_desc_col).value = replacement_desc
                     summary.total_replaced += 1
                 else:
-                    ws.cell(row=row_idx, column=status_col).value = "已失效"
+                    ws.cell(row=row_idx, column=status_col).value = "已失效，无替代料"
 
                 summary.records.append(record)
 
