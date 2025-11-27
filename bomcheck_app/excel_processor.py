@@ -159,6 +159,18 @@ def _is_probable_part_number(value: str) -> bool:
     return True
 
 
+_STANDARD_BOM_HEADER = [
+    "level",
+    "item",
+    "description",
+    "type",
+    "uom",
+    "quantity",
+    "unit cost",
+    "extended cost",
+]
+
+
 class ExcelProcessor:
     def __init__(self, config) -> None:
         self.config = config
@@ -324,12 +336,14 @@ class ExcelProcessor:
             if part_col_idx is None:
                 continue
 
+            start_row = self._detect_data_start_row(ws)
+
             replacement_start_col = ws.max_column + 1
             status_col = replacement_start_col
             replacement_col = replacement_start_col + 1
             replacement_desc_col = replacement_start_col + 2
 
-            for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
+            for row_idx, row in enumerate(ws.iter_rows(min_row=start_row), start=start_row):
                 if part_col_idx >= len(row):
                     continue
                 cell_value = row[part_col_idx].value
@@ -475,7 +489,18 @@ class ExcelProcessor:
             if part_col_idx is None:
                 continue
 
-            for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
+            start_row = self._detect_data_start_row(ws)
+            is_standard_bom = self._is_standard_bom(ws, start_row, part_col_idx)
+            if start_row != 2:
+                debug_logs.append(
+                    f"[{ws.title}] 检测到重复表头，数据自第{start_row}行开始"
+                )
+            if is_standard_bom:
+                debug_logs.append(f"[{ws.title}] 识别为标准BOM，数量按阶层乘积计算")
+
+            level_multipliers: List[float] = [1.0] * 6
+
+            for row_idx, row in enumerate(ws.iter_rows(min_row=start_row), start=start_row):
                 if part_col_idx >= len(row):
                     continue
 
@@ -505,6 +530,14 @@ class ExcelProcessor:
                     part_descriptions.setdefault(normalized_part, desc_value)
 
                 quantity = 1.0
+                level_value: Optional[int] = None
+                if is_standard_bom:
+                    level_value = self._parse_level_value(row[0].value if row else None)
+                    if level_value is None:
+                        debug_logs.append(
+                            f"[{ws.title}] 行{row_idx} 未能解析阶层值，跳过该行的数量"
+                        )
+                        continue
                 if qty_col_idx is not None and qty_col_idx < len(row):
                     quantity_cell = row[qty_col_idx]
                     parsed_quantity = self._parse_quantity_value(quantity_cell.value)
@@ -515,6 +548,11 @@ class ExcelProcessor:
                         debug_logs.append(
                             f"[{ws.title}] 行{row_idx} 数量列值 {quantity_cell.value!r} 无法解析，按0处理"
                         )
+
+                if is_standard_bom and level_value is not None:
+                    quantity = self._apply_level_multiplier(
+                        level_value, quantity, level_multipliers
+                    )
 
                 part_quantities[normalized_part] += quantity
 
@@ -625,6 +663,79 @@ class ExcelProcessor:
             return float(match.group())
         except ValueError:
             return None
+
+    def _row_matches_standard_header(self, row: Tuple) -> bool:
+        normalized = [
+            str(value).strip().lower() if value not in (None, "") else "" for value in row
+        ]
+        if len(normalized) < len(_STANDARD_BOM_HEADER):
+            return False
+        for start in range(0, len(normalized) - len(_STANDARD_BOM_HEADER) + 1):
+            if normalized[start : start + len(_STANDARD_BOM_HEADER)] == _STANDARD_BOM_HEADER:
+                return True
+        return False
+
+    def _detect_data_start_row(self, ws: Worksheet) -> int:
+        header_rows: List[int] = []
+        for idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+            if self._row_matches_standard_header(row):
+                header_rows.append(idx)
+                if len(header_rows) >= 2:
+                    break
+        if len(header_rows) >= 2:
+            return header_rows[1] + 1
+        return 2
+
+    def _parse_level_value(self, value) -> Optional[int]:
+        if isinstance(value, (int, float)) and isclose(value, round(value), abs_tol=1e-9):
+            level = int(round(value))
+            if 0 <= level <= 5:
+                return level
+        if isinstance(value, str):
+            text = value.strip()
+            if text.isdigit():
+                level = int(text)
+                if 0 <= level <= 5:
+                    return level
+        return None
+
+    def _is_standard_bom(self, ws: Worksheet, start_row: int, part_col_idx: int) -> bool:
+        if part_col_idx != 1:
+            return False
+
+        level_detected = False
+        for row in ws.iter_rows(
+            min_row=start_row, max_row=min(ws.max_row, start_row + 200), values_only=True
+        ):
+            if len(row) <= part_col_idx:
+                continue
+            part_value = row[part_col_idx]
+            if part_value in (None, ""):
+                continue
+            text = str(part_value).strip()
+            if not text or not _is_probable_part_number(text):
+                continue
+            level_value = self._parse_level_value(row[0] if row else None)
+            if level_value is None:
+                return False
+            level_detected = True
+
+        return level_detected
+
+    def _apply_level_multiplier(
+        self, level: int, row_quantity: float, level_multipliers: List[float]
+    ) -> float:
+        parent_multiplier = 1.0
+        if level > 0:
+            parent_multiplier = level_multipliers[level - 1]
+
+        cumulative_qty = parent_multiplier * row_quantity
+        level_multipliers[level] = cumulative_qty
+
+        for idx in range(level + 1, len(level_multipliers)):
+            level_multipliers[idx] = 1.0
+
+        return cumulative_qty
 
     def _identify_part_column(self, ws: Worksheet) -> Optional[int]:
         candidate_scores: List[Tuple[int, int, int]] = []  # (idx, u_count, text_count)
