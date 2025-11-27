@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.cell.cell import Cell
+from openpyxl.cell.cell import Cell, MergedCell
 from openpyxl.styles import PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -40,6 +40,12 @@ def normalize_part_no(value: str) -> str:
 
 
 BLACK_FILL = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+INFERRED_LEVEL_FILL = PatternFill(
+    start_color="FFFFE699", end_color="FFFFE699", fill_type="solid"
+)
+INFERRED_QUANTITY_FILL = PatternFill(
+    start_color="FFCCE5FF", end_color="FFCCE5FF", fill_type="solid"
+)
 
 
 _HEX_COLOR_PATTERN = re.compile(r"^[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$")
@@ -324,12 +330,16 @@ class ExcelProcessor:
             if part_col_idx is None:
                 continue
 
+            header_rows = self._find_standard_header_rows(ws)
+            is_standard_bom = self._is_standard_bom(header_rows)
+            start_row = header_rows[-1] + 1 if is_standard_bom else 2
+
             replacement_start_col = ws.max_column + 1
             status_col = replacement_start_col
             replacement_col = replacement_start_col + 1
             replacement_desc_col = replacement_start_col + 2
 
-            for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
+            for row_idx, row in enumerate(ws.iter_rows(min_row=start_row), start=start_row):
                 if part_col_idx >= len(row):
                     continue
                 cell_value = row[part_col_idx].value
@@ -475,7 +485,25 @@ class ExcelProcessor:
             if part_col_idx is None:
                 continue
 
-            for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
+            header_rows = self._find_standard_header_rows(ws)
+            is_standard_bom = self._is_standard_bom(header_rows)
+            start_row = header_rows[-1] + 1 if is_standard_bom else 2
+            if header_rows:
+                debug_logs.append(
+                    f"[{ws.title}] 检测到 {len(header_rows)} 行满足标准表头条件，数据自第{start_row}行开始"
+                )
+            if is_standard_bom:
+                debug_logs.append(f"[{ws.title}] 识别为标准BOM，数量按阶层乘积计算")
+            elif header_rows:
+                debug_logs.append(
+                    f"[{ws.title}] 满足表头条件的行不足2处，按非标准BOM处理"
+                )
+
+            level_multipliers: List[float] = [1.0] * 6
+            previous_level: Optional[int] = None
+            previous_prefix: Optional[str] = None
+
+            for row_idx, row in enumerate(ws.iter_rows(min_row=start_row), start=start_row):
                 if part_col_idx >= len(row):
                     continue
 
@@ -505,16 +533,69 @@ class ExcelProcessor:
                     part_descriptions.setdefault(normalized_part, desc_value)
 
                 quantity = 1.0
+                level_value: Optional[int] = None
+                if is_standard_bom:
+                    level_value = self._parse_level_value(row[0].value if row else None)
+                    current_prefix = self._extract_prefix(display_no)
+                    if level_value is None:
+                        level_value = self._infer_level_from_prefix(
+                            current_prefix, previous_prefix, previous_level
+                        )
+                        if level_value is not None and row:
+                            raw_level = row[0].value if row[0] else None
+                            if raw_level not in (None, ""):
+                                debug_logs.append(
+                                    f"[{ws.title}] 行{row_idx} 阶层值 {raw_level!r} 无法解析，按前后逻辑推算为 {level_value}"
+                                )
+                            else:
+                                target_cell = self._resolve_writable_level_cell(row[0], ws)
+                                if target_cell:
+                                    target_cell.value = level_value
+                                    target_cell.fill = INFERRED_LEVEL_FILL
+                                    debug_logs.append(
+                                        f"[{ws.title}] 行{row_idx} 缺失阶层，推算并写回为 {level_value}"
+                                    )
+                                else:
+                                    debug_logs.append(
+                                        f"[{ws.title}] 行{row_idx} 缺失阶层，推算为 {level_value} 但阶层单元格为合并单元格无法写入"
+                                    )
                 if qty_col_idx is not None and qty_col_idx < len(row):
                     quantity_cell = row[qty_col_idx]
-                    parsed_quantity = self._parse_quantity_value(quantity_cell.value)
-                    if parsed_quantity is not None:
-                        quantity = parsed_quantity
+                    writable_qty_cell = self._resolve_writable_level_cell(
+                        quantity_cell, ws
+                    )
+                    if quantity_cell.value in (None, ""):
+                        quantity = 1.0
+                        if writable_qty_cell:
+                            writable_qty_cell.value = 1
+                            writable_qty_cell.fill = INFERRED_QUANTITY_FILL
+                            debug_logs.append(
+                                f"[{ws.title}] 行{row_idx} 数量缺失，自动填充为 1"
+                            )
+                        else:
+                            debug_logs.append(
+                                f"[{ws.title}] 行{row_idx} 数量缺失，但数量单元格为合并单元格无法写入"
+                            )
                     else:
-                        quantity = 0.0
-                        debug_logs.append(
-                            f"[{ws.title}] 行{row_idx} 数量列值 {quantity_cell.value!r} 无法解析，按0处理"
-                        )
+                        parsed_quantity = self._parse_quantity_value(quantity_cell.value)
+                        if parsed_quantity is not None:
+                            quantity = parsed_quantity
+                        else:
+                            quantity = 0.0
+                            debug_logs.append(
+                                f"[{ws.title}] 行{row_idx} 数量列值 {quantity_cell.value!r} 无法解析，按0处理"
+                            )
+
+                if is_standard_bom and level_value is not None:
+                    quantity = self._apply_level_multiplier(
+                        level_value, quantity, level_multipliers
+                    )
+
+                if is_standard_bom:
+                    if level_value is not None:
+                        previous_level = level_value
+                    if current_prefix:
+                        previous_prefix = current_prefix
 
                 part_quantities[normalized_part] += quantity
 
@@ -625,6 +706,123 @@ class ExcelProcessor:
             return float(match.group())
         except ValueError:
             return None
+
+    def _row_matches_standard_header(self, row: Tuple) -> bool:
+        normalized = [
+            str(value).strip().lower() if value not in (None, "") else "" for value in row
+        ]
+        required_values = {
+            0: "level",
+            1: "item",
+            2: "description",
+            4: "type",
+            5: "uom",
+            6: "quantity",
+        }
+        for idx, expected in required_values.items():
+            if idx >= len(normalized) or normalized[idx] != expected:
+                return False
+        return True
+
+    def _find_standard_header_rows(self, ws: Worksheet) -> List[int]:
+        header_rows: List[int] = []
+        for idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+            if self._row_matches_standard_header(row):
+                header_rows.append(idx)
+        return header_rows
+
+    def _detect_data_start_row(self, ws: Worksheet) -> int:
+        header_rows = self._find_standard_header_rows(ws)
+        if self._is_standard_bom(header_rows):
+            return header_rows[-1] + 1
+        return 2
+
+    def _parse_level_value(self, value) -> Optional[int]:
+        if isinstance(value, (int, float)) and isclose(value, round(value), abs_tol=1e-9):
+            level = int(round(value))
+            if 0 <= level <= 5:
+                return level
+        if isinstance(value, str):
+            text = value.strip()
+            if text.isdigit():
+                level = int(text)
+                if 0 <= level <= 5:
+                    return level
+        return None
+
+    def _extract_prefix(self, part_no: str) -> str:
+        if not part_no:
+            return ""
+        text = str(part_no).strip().upper()
+        return text[:2]
+
+    def _infer_level_from_prefix(
+        self,
+        current_prefix: str,
+        previous_prefix: Optional[str],
+        previous_level: Optional[int],
+    ) -> Optional[int]:
+        if previous_level is None:
+            return 1
+
+        if not current_prefix:
+            return previous_level
+
+        if current_prefix == previous_prefix:
+            return previous_level
+
+        delta_rules: Dict[Tuple[str, str], int] = {
+            ("UA", "UB"): 1,
+            ("UA", "UC"): 1,
+            ("UB", "UC"): 1,
+            ("UB", "UA"): -1,
+            ("UC", "UB"): -1,
+            ("UC", "UA"): -2,
+        }
+
+        delta = delta_rules.get((previous_prefix or "", current_prefix), 0)
+        inferred = max(previous_level + delta, 1)
+        return inferred
+
+    def _resolve_writable_level_cell(self, cell: Cell, ws: Worksheet) -> Optional[Cell]:
+        """Resolve writable cell when the target coordinate is merged.
+
+        openpyxl returns ``MergedCell`` objects for merged coordinates, which reject
+        assignments.  For inferred values we locate the master cell at the upper-left
+        corner of the merged range so the value and highlight can be applied safely.
+        """
+
+        if not isinstance(cell, MergedCell):
+            return cell
+
+        for merged_range in ws.merged_cells.ranges:
+            if cell.coordinate in merged_range:
+                target = ws.cell(row=merged_range.min_row, column=merged_range.min_col)
+                if isinstance(target, MergedCell):
+                    return None
+                return target
+
+        return None
+
+    def _is_standard_bom(self, header_rows: List[int]) -> bool:
+        return len(header_rows) > 1
+
+    def _apply_level_multiplier(
+        self, level: int, row_quantity: float, level_multipliers: List[float]
+    ) -> float:
+        while level >= len(level_multipliers):
+            level_multipliers.append(1.0)
+        parent_multiplier = 1.0
+        if level > 0:
+            parent_multiplier = level_multipliers[level - 1]
+
+        cumulative_qty = parent_multiplier * row_quantity
+        level_multipliers[level] = cumulative_qty
+
+        for idx in range(level + 1, len(level_multipliers)):
+            level_multipliers[idx] = 1.0
+
+        return cumulative_qty
 
     def _identify_part_column(self, ws: Worksheet) -> Optional[int]:
         candidate_scores: List[Tuple[int, int, int]] = []  # (idx, u_count, text_count)
