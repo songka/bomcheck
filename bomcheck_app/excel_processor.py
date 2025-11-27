@@ -499,6 +499,8 @@ class ExcelProcessor:
                 debug_logs.append(f"[{ws.title}] 识别为标准BOM，数量按阶层乘积计算")
 
             level_multipliers: List[float] = [1.0] * 6
+            previous_level: Optional[int] = None
+            previous_prefix: Optional[str] = None
 
             for row_idx, row in enumerate(ws.iter_rows(min_row=start_row), start=start_row):
                 if part_col_idx >= len(row):
@@ -533,21 +535,39 @@ class ExcelProcessor:
                 level_value: Optional[int] = None
                 if is_standard_bom:
                     level_value = self._parse_level_value(row[0].value if row else None)
+                    current_prefix = self._extract_prefix(display_no)
                     if level_value is None:
-                        debug_logs.append(
-                            f"[{ws.title}] 行{row_idx} 未能解析阶层值，跳过该行的数量"
+                        level_value = self._infer_level_from_prefix(
+                            current_prefix, previous_prefix, previous_level
                         )
-                        continue
+                        if level_value is not None and row and row[0].value not in (None, ""):
+                            debug_logs.append(
+                                f"[{ws.title}] 行{row_idx} 阶层值 {row[0].value!r} 无法解析，按前后逻辑推算为 {level_value}"
+                            )
                 if qty_col_idx is not None and qty_col_idx < len(row):
                     quantity_cell = row[qty_col_idx]
-                    parsed_quantity = self._parse_quantity_value(quantity_cell.value)
-                    if parsed_quantity is not None:
-                        quantity = parsed_quantity
+                    if quantity_cell.value in (None, ""):
+                        quantity = 1.0
                     else:
-                        quantity = 0.0
-                        debug_logs.append(
-                            f"[{ws.title}] 行{row_idx} 数量列值 {quantity_cell.value!r} 无法解析，按0处理"
-                        )
+                        parsed_quantity = self._parse_quantity_value(quantity_cell.value)
+                        if parsed_quantity is not None:
+                            quantity = parsed_quantity
+                        else:
+                            quantity = 0.0
+                            debug_logs.append(
+                                f"[{ws.title}] 行{row_idx} 数量列值 {quantity_cell.value!r} 无法解析，按0处理"
+                            )
+
+                if is_standard_bom and level_value is not None:
+                    quantity = self._apply_level_multiplier(
+                        level_value, quantity, level_multipliers
+                    )
+
+                if is_standard_bom:
+                    if level_value is not None:
+                        previous_level = level_value
+                    if current_prefix:
+                        previous_prefix = current_prefix
 
                 if is_standard_bom and level_value is not None:
                     quantity = self._apply_level_multiplier(
@@ -699,11 +719,45 @@ class ExcelProcessor:
                     return level
         return None
 
+    def _extract_prefix(self, part_no: str) -> str:
+        if not part_no:
+            return ""
+        text = str(part_no).strip().upper()
+        return text[:2]
+
+    def _infer_level_from_prefix(
+        self,
+        current_prefix: str,
+        previous_prefix: Optional[str],
+        previous_level: Optional[int],
+    ) -> Optional[int]:
+        if previous_level is None:
+            return 1
+
+        if not current_prefix:
+            return previous_level
+
+        if current_prefix == previous_prefix:
+            return previous_level
+
+        delta_rules: Dict[Tuple[str, str], int] = {
+            ("UA", "UB"): 1,
+            ("UA", "UC"): 1,
+            ("UB", "UA"): -1,
+            ("UC", "UB"): -1,
+            ("UC", "UA"): -2,
+        }
+
+        delta = delta_rules.get((previous_prefix or "", current_prefix), 0)
+        inferred = max(previous_level + delta, 1)
+        return inferred
+
     def _is_standard_bom(self, ws: Worksheet, start_row: int, part_col_idx: int) -> bool:
         if part_col_idx != 1:
             return False
 
         level_detected = False
+        prefix_detected = False
         for row in ws.iter_rows(
             min_row=start_row, max_row=min(ws.max_row, start_row + 200), values_only=True
         ):
@@ -715,16 +769,21 @@ class ExcelProcessor:
             text = str(part_value).strip()
             if not text or not _is_probable_part_number(text):
                 continue
+            prefix = self._extract_prefix(text)
+            if prefix in {"UA", "UB", "UC"}:
+                prefix_detected = True
             level_value = self._parse_level_value(row[0] if row else None)
             if level_value is None:
-                return False
+                continue
             level_detected = True
 
-        return level_detected
+        return level_detected or prefix_detected
 
     def _apply_level_multiplier(
         self, level: int, row_quantity: float, level_multipliers: List[float]
     ) -> float:
+        while level >= len(level_multipliers):
+            level_multipliers.append(1.0)
         parent_multiplier = 1.0
         if level > 0:
             parent_multiplier = level_multipliers[level - 1]
