@@ -40,6 +40,9 @@ def normalize_part_no(value: str) -> str:
 
 
 BLACK_FILL = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+INFERRED_LEVEL_FILL = PatternFill(
+    start_color="FFFFE699", end_color="FFFFE699", fill_type="solid"
+)
 
 
 _HEX_COLOR_PATTERN = re.compile(r"^[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$")
@@ -540,10 +543,18 @@ class ExcelProcessor:
                         level_value = self._infer_level_from_prefix(
                             current_prefix, previous_prefix, previous_level
                         )
-                        if level_value is not None and row and row[0].value not in (None, ""):
-                            debug_logs.append(
-                                f"[{ws.title}] 行{row_idx} 阶层值 {row[0].value!r} 无法解析，按前后逻辑推算为 {level_value}"
-                            )
+                        if level_value is not None and row:
+                            raw_level = row[0].value if row[0] else None
+                            if raw_level not in (None, ""):
+                                debug_logs.append(
+                                    f"[{ws.title}] 行{row_idx} 阶层值 {raw_level!r} 无法解析，按前后逻辑推算为 {level_value}"
+                                )
+                            else:
+                                row[0].value = level_value
+                                row[0].fill = INFERRED_LEVEL_FILL
+                                debug_logs.append(
+                                    f"[{ws.title}] 行{row_idx} 缺失阶层，推算并写回为 {level_value}"
+                                )
                 if qty_col_idx is not None and qty_col_idx < len(row):
                     quantity_cell = row[qty_col_idx]
                     if quantity_cell.value in (None, ""):
@@ -568,11 +579,6 @@ class ExcelProcessor:
                         previous_level = level_value
                     if current_prefix:
                         previous_prefix = current_prefix
-
-                if is_standard_bom and level_value is not None:
-                    quantity = self._apply_level_multiplier(
-                        level_value, quantity, level_multipliers
-                    )
 
                 part_quantities[normalized_part] += quantity
 
