@@ -342,7 +342,9 @@ class ExcelProcessor:
             if part_col_idx is None:
                 continue
 
-            start_row = self._detect_data_start_row(ws)
+            header_rows = self._find_standard_header_rows(ws)
+            is_standard_bom = self._is_standard_bom(header_rows)
+            start_row = header_rows[-1] + 1 if is_standard_bom else 2
 
             replacement_start_col = ws.max_column + 1
             status_col = replacement_start_col
@@ -495,14 +497,19 @@ class ExcelProcessor:
             if part_col_idx is None:
                 continue
 
-            start_row = self._detect_data_start_row(ws)
-            is_standard_bom = self._is_standard_bom(ws, start_row, part_col_idx)
-            if start_row != 2:
+            header_rows = self._find_standard_header_rows(ws)
+            is_standard_bom = self._is_standard_bom(header_rows)
+            start_row = header_rows[-1] + 1 if is_standard_bom else 2
+            if header_rows:
                 debug_logs.append(
-                    f"[{ws.title}] 检测到重复表头，数据自第{start_row}行开始"
+                    f"[{ws.title}] 检测到 {len(header_rows)} 行满足标准表头条件，数据自第{start_row}行开始"
                 )
             if is_standard_bom:
                 debug_logs.append(f"[{ws.title}] 识别为标准BOM，数量按阶层乘积计算")
+            elif header_rows:
+                debug_logs.append(
+                    f"[{ws.title}] 满足表头条件的行不足2处，按非标准BOM处理"
+                )
 
             level_multipliers: List[float] = [1.0] * 6
             previous_level: Optional[int] = None
@@ -716,22 +723,30 @@ class ExcelProcessor:
         normalized = [
             str(value).strip().lower() if value not in (None, "") else "" for value in row
         ]
-        if len(normalized) < len(_STANDARD_BOM_HEADER):
-            return False
-        for start in range(0, len(normalized) - len(_STANDARD_BOM_HEADER) + 1):
-            if normalized[start : start + len(_STANDARD_BOM_HEADER)] == _STANDARD_BOM_HEADER:
-                return True
-        return False
+        required_values = {
+            0: "level",
+            1: "item",
+            2: "description",
+            4: "type",
+            5: "uom",
+            6: "quantity",
+        }
+        for idx, expected in required_values.items():
+            if idx >= len(normalized) or normalized[idx] != expected:
+                return False
+        return True
 
-    def _detect_data_start_row(self, ws: Worksheet) -> int:
+    def _find_standard_header_rows(self, ws: Worksheet) -> List[int]:
         header_rows: List[int] = []
         for idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
             if self._row_matches_standard_header(row):
                 header_rows.append(idx)
-                if len(header_rows) >= 2:
-                    break
-        if len(header_rows) >= 2:
-            return header_rows[1] + 1
+        return header_rows
+
+    def _detect_data_start_row(self, ws: Worksheet) -> int:
+        header_rows = self._find_standard_header_rows(ws)
+        if self._is_standard_bom(header_rows):
+            return header_rows[-1] + 1
         return 2
 
     def _parse_level_value(self, value) -> Optional[int]:
@@ -801,32 +816,8 @@ class ExcelProcessor:
 
         return None
 
-    def _is_standard_bom(self, ws: Worksheet, start_row: int, part_col_idx: int) -> bool:
-        if part_col_idx != 1:
-            return False
-
-        level_detected = False
-        prefix_detected = False
-        for row in ws.iter_rows(
-            min_row=start_row, max_row=min(ws.max_row, start_row + 200), values_only=True
-        ):
-            if len(row) <= part_col_idx:
-                continue
-            part_value = row[part_col_idx]
-            if part_value in (None, ""):
-                continue
-            text = str(part_value).strip()
-            if not text or not _is_probable_part_number(text):
-                continue
-            prefix = self._extract_prefix(text)
-            if prefix in {"UA", "UB", "UC"}:
-                prefix_detected = True
-            level_value = self._parse_level_value(row[0] if row else None)
-            if level_value is None:
-                continue
-            level_detected = True
-
-        return level_detected or prefix_detected
+    def _is_standard_bom(self, header_rows: List[int]) -> bool:
+        return len(header_rows) > 1
 
     def _apply_level_multiplier(
         self, level: int, row_quantity: float, level_multipliers: List[float]
