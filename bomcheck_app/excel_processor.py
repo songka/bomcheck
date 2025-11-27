@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.cell.cell import Cell
+from openpyxl.cell.cell import Cell, MergedCell
 from openpyxl.styles import PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -550,11 +550,17 @@ class ExcelProcessor:
                                     f"[{ws.title}] 行{row_idx} 阶层值 {raw_level!r} 无法解析，按前后逻辑推算为 {level_value}"
                                 )
                             else:
-                                row[0].value = level_value
-                                row[0].fill = INFERRED_LEVEL_FILL
-                                debug_logs.append(
-                                    f"[{ws.title}] 行{row_idx} 缺失阶层，推算并写回为 {level_value}"
-                                )
+                                target_cell = self._resolve_writable_level_cell(row[0], ws)
+                                if target_cell:
+                                    target_cell.value = level_value
+                                    target_cell.fill = INFERRED_LEVEL_FILL
+                                    debug_logs.append(
+                                        f"[{ws.title}] 行{row_idx} 缺失阶层，推算并写回为 {level_value}"
+                                    )
+                                else:
+                                    debug_logs.append(
+                                        f"[{ws.title}] 行{row_idx} 缺失阶层，推算为 {level_value} 但阶层单元格为合并单元格无法写入"
+                                    )
                 if qty_col_idx is not None and qty_col_idx < len(row):
                     quantity_cell = row[qty_col_idx]
                     if quantity_cell.value in (None, ""):
@@ -757,6 +763,26 @@ class ExcelProcessor:
         delta = delta_rules.get((previous_prefix or "", current_prefix), 0)
         inferred = max(previous_level + delta, 1)
         return inferred
+
+    def _resolve_writable_level_cell(self, cell: Cell, ws: Worksheet) -> Optional[Cell]:
+        """Resolve writable cell when the level column is merged.
+
+        openpyxl returns ``MergedCell`` objects for merged coordinates, which reject
+        assignments.  For inferred levels we locate the master cell at the upper-left
+        corner of the merged range so the value and highlight can be applied safely.
+        """
+
+        if not isinstance(cell, MergedCell):
+            return cell
+
+        for merged_range in ws.merged_cells.ranges:
+            if cell.coordinate in merged_range:
+                target = ws.cell(row=merged_range.min_row, column=merged_range.min_col)
+                if isinstance(target, MergedCell):
+                    return None
+                return target
+
+        return None
 
     def _is_standard_bom(self, ws: Worksheet, start_row: int, part_col_idx: int) -> bool:
         if part_col_idx != 1:
