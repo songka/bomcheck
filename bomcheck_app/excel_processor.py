@@ -165,6 +165,18 @@ def _is_probable_part_number(value: str) -> bool:
     return True
 
 
+_STANDARD_BOM_HEADER = [
+    "level",
+    "item",
+    "description",
+    "type",
+    "uom",
+    "quantity",
+    "unit cost",
+    "extended cost",
+]
+
+
 class ExcelProcessor:
     def __init__(self, config) -> None:
         self.config = config
