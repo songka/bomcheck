@@ -569,6 +569,11 @@ class ExcelProcessor:
                     if current_prefix:
                         previous_prefix = current_prefix
 
+                if is_standard_bom and level_value is not None:
+                    quantity = self._apply_level_multiplier(
+                        level_value, quantity, level_multipliers
+                    )
+
                 part_quantities[normalized_part] += quantity
 
         return part_quantities, part_descriptions, part_display, debug_logs
