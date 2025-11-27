@@ -43,6 +43,9 @@ BLACK_FILL = PatternFill(start_color="000000", end_color="000000", fill_type="so
 INFERRED_LEVEL_FILL = PatternFill(
     start_color="FFFFE699", end_color="FFFFE699", fill_type="solid"
 )
+INFERRED_QUANTITY_FILL = PatternFill(
+    start_color="FFCCE5FF", end_color="FFCCE5FF", fill_type="solid"
+)
 
 
 _HEX_COLOR_PATTERN = re.compile(r"^[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$")
@@ -563,8 +566,21 @@ class ExcelProcessor:
                                     )
                 if qty_col_idx is not None and qty_col_idx < len(row):
                     quantity_cell = row[qty_col_idx]
+                    writable_qty_cell = self._resolve_writable_level_cell(
+                        quantity_cell, ws
+                    )
                     if quantity_cell.value in (None, ""):
                         quantity = 1.0
+                        if writable_qty_cell:
+                            writable_qty_cell.value = 1
+                            writable_qty_cell.fill = INFERRED_QUANTITY_FILL
+                            debug_logs.append(
+                                f"[{ws.title}] 行{row_idx} 数量缺失，自动填充为 1"
+                            )
+                        else:
+                            debug_logs.append(
+                                f"[{ws.title}] 行{row_idx} 数量缺失，但数量单元格为合并单元格无法写入"
+                            )
                     else:
                         parsed_quantity = self._parse_quantity_value(quantity_cell.value)
                         if parsed_quantity is not None:
@@ -755,6 +771,7 @@ class ExcelProcessor:
         delta_rules: Dict[Tuple[str, str], int] = {
             ("UA", "UB"): 1,
             ("UA", "UC"): 1,
+            ("UB", "UC"): 1,
             ("UB", "UA"): -1,
             ("UC", "UB"): -1,
             ("UC", "UA"): -2,
@@ -765,10 +782,10 @@ class ExcelProcessor:
         return inferred
 
     def _resolve_writable_level_cell(self, cell: Cell, ws: Worksheet) -> Optional[Cell]:
-        """Resolve writable cell when the level column is merged.
+        """Resolve writable cell when the target coordinate is merged.
 
         openpyxl returns ``MergedCell`` objects for merged coordinates, which reject
-        assignments.  For inferred levels we locate the master cell at the upper-left
+        assignments.  For inferred values we locate the master cell at the upper-left
         corner of the merged range so the value and highlight can be applied safely.
         """
 
