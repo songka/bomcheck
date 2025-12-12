@@ -904,20 +904,22 @@ class ExcelProcessor:
                 for index_key, index_display in index_candidates
             ]
 
-            if (
-                not candidate_entries
-                and not project.index_part_no
-                and not (project.index_part_desc or "").strip()
-            ):
+            if not candidate_entries and not project.index_part_no:
                 group_candidates = self._resolve_group_based_candidates(
                     project, part_quantities, part_display
                 )
                 if group_candidates:
                     candidate_entries.extend(group_candidates)
-                    debug_logs.append(
-                        f"[绑定]{project.project_desc} 未设置索引料号，按分组可选料号匹配到 "
-                        f"{len(group_candidates)} 个主料"
-                    )
+                    if (project.index_part_desc or "").strip():
+                        debug_logs.append(
+                            f"[绑定]{project.project_desc} 索引描述未命中，按分组可选料号匹配到 "
+                            f"{len(group_candidates)} 个主料"
+                        )
+                    else:
+                        debug_logs.append(
+                            f"[绑定]{project.project_desc} 未设置索引料号，按分组可选料号匹配到 "
+                            f"{len(group_candidates)} 个主料"
+                        )
 
             if not candidate_entries:
                 debug_logs.append(
