@@ -904,22 +904,26 @@ class ExcelProcessor:
                 for index_key, index_display in index_candidates
             ]
 
-            if not candidate_entries and not project.index_part_no:
+            if (
+                not candidate_entries
+                and not project.index_part_no
+                and not (project.index_part_desc or "").strip()
+            ):
                 group_candidates = self._resolve_group_based_candidates(
                     project, part_quantities, part_display
                 )
                 if group_candidates:
                     candidate_entries.extend(group_candidates)
-                    if (project.index_part_desc or "").strip():
-                        debug_logs.append(
-                            f"[绑定]{project.project_desc} 索引描述未命中，按分组可选料号匹配到 "
-                            f"{len(group_candidates)} 个主料"
-                        )
-                    else:
-                        debug_logs.append(
-                            f"[绑定]{project.project_desc} 未设置索引料号，按分组可选料号匹配到 "
-                            f"{len(group_candidates)} 个主料"
-                        )
+                    debug_logs.append(
+                        f"[绑定]{project.project_desc} 未设置索引料号，按分组可选料号匹配到 "
+                        f"{len(group_candidates)} 个主料"
+                    )
+
+
+
+
+
+
 
             if not candidate_entries:
                 debug_logs.append(
@@ -1407,28 +1411,18 @@ def _build_description_matcher(expression: str) -> Callable[[str], bool]:
     if not postfix:
         return lambda desc: False
 
-    keyword_patterns: Dict[str, Optional[re.Pattern[str]]] = {}
-
-    def _is_ascii_keyword(value: str) -> bool:
-        return bool(value) and all(ord(ch) < 128 and ch.isalnum() for ch in value)
-
-    for item in postfix:
-        if not (isinstance(item, tuple) and item[0] == "KW"):
-            continue
-        keyword = item[1]
-        if keyword in keyword_patterns:
-            continue
-        if _is_ascii_keyword(keyword):
-            keyword_patterns[keyword] = re.compile(rf"\b{re.escape(keyword)}\b")
-        else:
-            keyword_patterns[keyword] = None
+    # === 修改说明 ===
+    # 原代码在此处构建了 keyword_patterns 并对 ASCII 字符启用了正则 \b 全字匹配。
+    # 这导致类似 "ZHC10" 无法匹配关键字 "HC10"。
+    # 下面的新逻辑移除了正则构建，直接在 _match 中使用字符串 in 操作。
+    # ===============
 
     def _match(desc: str) -> bool:
         normalized_desc = _normalize_description_symbols(normalize_text(desc))
         if not normalized_desc:
             return False
 
-        ascii_tokens = set(re.findall(r"[0-9a-zA-Z]+", normalized_desc))
+        # 原代码此处提取了 ascii_tokens，现在不再需要
 
         stack: List[bool] = []
         for item in postfix:
@@ -1437,11 +1431,10 @@ def _build_description_matcher(expression: str) -> Callable[[str], bool]:
                 if not keyword:
                     stack.append(False)
                 else:
-                    pattern = keyword_patterns.get(keyword)
-                    if pattern:
-                        stack.append(keyword in ascii_tokens or bool(pattern.search(normalized_desc)))
-                    else:
-                        stack.append(keyword in normalized_desc)
+                    # === 核心修改 ===
+                    # 无论关键字是中文还是英文数字，统一使用子字符串包含判断
+                    # 这样 "HC10" 就可以匹配 "ZHC10" 了
+                    stack.append(keyword in normalized_desc)
             elif item == "AND":
                 if len(stack) < 2:
                     return False
@@ -1457,7 +1450,6 @@ def _build_description_matcher(expression: str) -> Callable[[str], bool]:
         return bool(stack and stack[-1])
 
     return _match
-
 
 def _tokenize_description_expression(expression: str) -> List[str]:
     normalized = _normalize_description_symbols(expression)
